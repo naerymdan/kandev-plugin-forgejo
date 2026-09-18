@@ -20,6 +20,12 @@
   color: var(--foreground, inherit);
 }
 
+.forgejo-connection__scope {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--muted-foreground, inherit);
+}
+
 .forgejo-connection__error {
   margin: 0;
   font-size: 0.875rem;

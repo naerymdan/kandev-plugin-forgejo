@@ -36,14 +36,19 @@ window.registerKandevPlugin(PLUGIN_ID, {
     // Kandev's native integration settings surface, shared with the built-in
     // code hosts. The credential fields themselves come from the manifest's
     // config_schema; this panel only reports reachability.
-    registry.registerIntegrationSettings({
-      id: PROVIDER_ID,
-      label: "Forgejo",
-      description:
-        "Connect a Forgejo or Gitea instance for repositories, pull requests, and reviews.",
-      icon,
-      Component: createConnectionPanel(host),
-    });
+    //
+    // Guarded: the source-control registrations above are the plugin's reason
+    // to exist, and a host without this hook must not take them down with it.
+    if (typeof registry.registerIntegrationSettings === "function") {
+      registry.registerIntegrationSettings({
+        id: PROVIDER_ID,
+        label: "Forgejo",
+        description:
+          "Connect a Forgejo or Gitea instance for repositories, pull requests, and reviews.",
+        icon,
+        Component: createConnectionPanel(host),
+      });
+    }
   },
 
   // initialize may run again in the same tab after a disable/enable cycle, so

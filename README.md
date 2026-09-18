@@ -122,6 +122,77 @@ CI runs the same suite against the floor and the current release of each host on
 every change, and asserts the detected flavor matches the host under test. If
 the shared surface ever diverges, that matrix fails first.
 
+## Connection scope
+
+**One connection serves every workspace.** The instance URL and token live in the
+manifest's `config_schema`, which Kandev stores as a single plugin-level record
+and renders at **Settings → Plugins → Forgejo**. Configure it once and it applies
+everywhere.
+
+The panel on the workspace integrations screen is a *status* surface, not a
+second place to configure credentials: it reports whether the shared connection
+is reachable and publishes that to the per-workspace enabled badge. It says so
+on screen, because a per-workspace panel backed by a global credential is
+otherwise easy to misread as a per-workspace setting.
+
+If you need different Forgejo instances or different tokens per workspace, this
+plugin does not support that today. It would mean moving the connection out of
+`config_schema` and into workspace-scoped Host state and secrets, with explicit
+save and disconnect actions — a deliberate change, not a configuration option.
+
+## Headless install and configuration
+
+The UI flow above is the normal path. Everything it does is reachable over HTTP,
+which is what scripted and headless installs need. All routes are Kandev's, not
+this plugin's.
+
+```sh
+KANDEV=https://kandev.example.com
+ID=kandev-plugin-forgejo
+
+# Install from a local package...
+curl -sf -X POST "$KANDEV/api/plugins/install" -F "package=@$ID-0.1.0.tar.gz"
+# ...or straight from a release URL.
+curl -sf -X POST "$KANDEV/api/plugins/install" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://github.com/naerymdan/kandev-plugin-forgejo/releases/download/v0.1.0/'"$ID"'-0.1.0.tar.gz"}'
+
+# Configure. The `config` wrapper is required: a flat body is rejected with a
+# misleading `missing required field "base_url"`.
+curl -sf -X PATCH "$KANDEV/api/plugins/$ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"config":{"base_url":"https://forgejo.example.com","api_token":"<token>"}}'
+
+# Invoke an action. The `body` wrapper is required too: omitting it returns
+# 503 `plugin action unavailable`, with the real cause (`unexpected end of
+# JSON input`) only in the server log.
+curl -sf -X POST "$KANDEV/api/plugins/$ID/actions/connection.test" \
+  -H 'Content-Type: application/json' \
+  -d '{"workspaceId":"<workspace-id>"}'
+```
+
+Every action in this plugin is `scope: "workspace"`, so **`workspaceId` is
+required on all of them**. Kandev validates the envelope before dispatching, so
+a missing selector fails with a 400 that never reaches the plugin process.
+
+Action bodies:
+
+| Action | Body |
+| --- | --- |
+| `connection.get` / `connection.test` | none |
+| `repositories.list` | `{"query":"","cursor":"","limit":100}` |
+| `repositories.inspect` | `{"url":"https://forgejo.example.com/owner/repo"}` |
+| `repositories.branches` | `{"repository":{…full descriptor…}}` — a flat identity is rejected |
+| `change_requests.get` / `.associations` | none |
+| `change_requests.create` | `{"title","description","destination","draft"}` (also needs `taskId`, `sessionId`, `repositoryId`) |
+| `change_requests.link` | `{"reference":"owner/repo#1"}` (also needs `taskId`) |
+| `change_requests.unlink` | `{"connection_scope","repository_id","number"}` (also needs `taskId`) |
+
+> **`DELETE /api/plugins/{id}` uninstalls immediately.** There is no
+> confirmation step and it removes the plugin's config, state, and secrets. It
+> is easy to hit while probing routes. This is Kandev's API, not this plugin's,
+> but it is worth knowing before you script against it.
+
 ## Identity and security notes
 
 - **Repository identity is the instance's immutable numeric id**, never

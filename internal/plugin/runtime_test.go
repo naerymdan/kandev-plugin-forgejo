@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"kandev-plugin-forgejo/internal/sourcecontrol"
@@ -18,16 +20,47 @@ import (
 type configHost struct {
 	pluginsdk.UnimplementedHostData
 	config map[string]any
+
+	mu    sync.Mutex
+	state map[string]map[string]any
+}
+
+func newConfigHost(config map[string]any) *configHost {
+	return &configHost{config: config, state: map[string]map[string]any{}}
 }
 
 func (h *configHost) GetConfig(context.Context) (map[string]any, error) { return h.config, nil }
-func (h *configHost) GetState(context.Context, string, string, string) (map[string]any, bool, error) {
-	return nil, false, nil
+func (h *configHost) stateKey(scope, scopeID, key string) string {
+	return scope + "/" + scopeID + "/" + key
 }
-func (h *configHost) SetState(context.Context, string, string, string, map[string]any) error {
+
+func (h *configHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	value, ok := h.state[h.stateKey(scope, scopeID, key)]
+	return value, ok, nil
+}
+
+func (h *configHost) SetState(_ context.Context, scope, scopeID, key string, value map[string]any) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Host state round-trips through JSON: an int64 comes back as float64.
+	encoded, _ := json.Marshal(value)
+	var decoded map[string]any
+	_ = json.Unmarshal(encoded, &decoded)
+	if h.state == nil {
+		h.state = map[string]map[string]any{}
+	}
+	h.state[h.stateKey(scope, scopeID, key)] = decoded
 	return nil
 }
-func (h *configHost) DeleteState(context.Context, string, string, string) error { return nil }
+
+func (h *configHost) DeleteState(_ context.Context, scope, scopeID, key string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.state, h.stateKey(scope, scopeID, key))
+	return nil
+}
 func (h *configHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
 	return nil, nil
 }
@@ -53,7 +86,7 @@ func decodeBody(t *testing.T, response *pluginsdk.PluginActionResponse) map[stri
 func TestConnectionGetReportsUnconfigured(t *testing.T) {
 	t.Parallel()
 	runtime := NewRuntime()
-	runtime.SetHost(&configHost{config: map[string]any{}})
+	runtime.SetHost(newConfigHost(map[string]any{}))
 
 	response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
 		ActionKey: ActionConnectionGet,
@@ -100,9 +133,9 @@ func TestConnectionTestReportsFlavorAndNeverLeaksToken(t *testing.T) {
 			defer server.Close()
 
 			runtime := NewRuntime()
-			runtime.SetHost(&configHost{config: map[string]any{
+			runtime.SetHost(newConfigHost(map[string]any{
 				"base_url": server.URL, "api_token": "super-secret-token",
-			}})
+			}))
 
 			response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
 				ActionKey: ActionConnectionTest,
@@ -129,7 +162,7 @@ func TestConnectionTestReportsRejectedToken(t *testing.T) {
 	defer server.Close()
 
 	runtime := NewRuntime()
-	runtime.SetHost(&configHost{config: map[string]any{"base_url": server.URL, "api_token": "super-secret-token"}})
+	runtime.SetHost(newConfigHost(map[string]any{"base_url": server.URL, "api_token": "super-secret-token"}))
 
 	response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
 		ActionKey: ActionConnectionTest,
@@ -146,7 +179,7 @@ func TestConnectionTestReportsRejectedToken(t *testing.T) {
 func TestSourceControlActionsAreDelegated(t *testing.T) {
 	t.Parallel()
 	runtime := NewRuntime()
-	runtime.SetHost(&configHost{config: map[string]any{}})
+	runtime.SetHost(newConfigHost(map[string]any{}))
 
 	// Delegation is proven by the recipe's own guard firing, rather than the
 	// runtime's "unsupported action" path.
@@ -168,7 +201,7 @@ func TestSourceControlActionsAreDelegated(t *testing.T) {
 func TestReferenceRPCsAreDelegatedAndFailClosed(t *testing.T) {
 	t.Parallel()
 	runtime := NewRuntime()
-	runtime.SetHost(&configHost{config: map[string]any{}})
+	runtime.SetHost(newConfigHost(map[string]any{}))
 
 	// A search for a source this plugin does not own must be rejected.
 	_, err := runtime.SearchEntityReferences(context.Background(), &pluginsdk.SearchEntityReferencesRequest{
@@ -205,7 +238,7 @@ func TestRuntimeToleratesMissingHost(t *testing.T) {
 func TestHandleActionHonorsCancellation(t *testing.T) {
 	t.Parallel()
 	runtime := NewRuntime()
-	runtime.SetHost(&configHost{config: map[string]any{}})
+	runtime.SetHost(newConfigHost(map[string]any{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -213,4 +246,143 @@ func TestHandleActionHonorsCancellation(t *testing.T) {
 		ActionKey: sourcecontrol.ActionRepositoriesList,
 	})
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// probeCountingServer is a fake instance that records how many live probes it
+// served, so a cached answer is distinguishable from a fresh one.
+func probeCountingServer(t *testing.T, version string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var probes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/user":
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"login":"kandev"}`))
+		case "/api/v1/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": version})
+		case "/api/forgejo/v1/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": version})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, &probes
+}
+
+func connectionAction(t *testing.T, runtime *Runtime, key, workspaceID string) map[string]any {
+	t.Helper()
+	response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: key,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: workspaceID},
+	})
+	require.NoError(t, err)
+	return decodeBody(t, response)
+}
+
+// Regression: connection.get used to report connected:false unconditionally, so
+// the panel showed "not connected" on every mount even seconds after a
+// successful connection.test, and reverted on each refresh.
+func TestConnectionGetReportsLiveState(t *testing.T) {
+	t.Parallel()
+	server, probes := probeCountingServer(t, "16.0.5+gitea-1.22.0")
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{"base_url": server.URL, "api_token": "t"}))
+
+	body := connectionAction(t, runtime, ActionConnectionGet, "workspace-1")
+	require.Equal(t, true, body["configured"])
+	require.Equal(t, true, body["connected"], "get must report the real connection state")
+	require.Equal(t, "kandev", body["account"])
+	require.Equal(t, int64(1), probes.Load())
+}
+
+func TestConnectionGetServesCacheThenTestForcesProbe(t *testing.T) {
+	t.Parallel()
+	server, probes := probeCountingServer(t, "1.27.3")
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{"base_url": server.URL, "api_token": "t"}))
+
+	require.Equal(t, true, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["connected"])
+	require.Equal(t, int64(1), probes.Load())
+
+	// Within the TTL a second get is served from cache.
+	cached := connectionAction(t, runtime, ActionConnectionGet, "workspace-1")
+	require.Equal(t, true, cached["connected"])
+	require.Equal(t, true, cached["cached"])
+	require.Equal(t, "kandev", cached["account"])
+	require.Equal(t, int64(1), probes.Load(), "a cached get must not hit the instance")
+
+	// An explicit test always re-probes and is never marked cached.
+	fresh := connectionAction(t, runtime, ActionConnectionTest, "workspace-1")
+	require.Equal(t, true, fresh["connected"])
+	require.Nil(t, fresh["cached"])
+	require.Equal(t, int64(2), probes.Load())
+}
+
+// A cache entry written for one instance must not answer for another.
+func TestConnectionCacheIsScopedToTheConfiguredInstance(t *testing.T) {
+	t.Parallel()
+	first, firstProbes := probeCountingServer(t, "1.27.3")
+	second, secondProbes := probeCountingServer(t, "16.0.5+gitea-1.22.0")
+	host := newConfigHost(map[string]any{"base_url": first.URL, "api_token": "t"})
+	runtime := NewRuntime()
+	runtime.SetHost(host)
+
+	require.Equal(t, true, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["connected"])
+	require.Equal(t, int64(1), firstProbes.Load())
+
+	host.config = map[string]any{"base_url": second.URL, "api_token": "t"}
+	body := connectionAction(t, runtime, ActionConnectionGet, "workspace-1")
+	require.Equal(t, second.URL, body["instance_url"])
+	require.Nil(t, body["cached"], "a cache entry for the old instance must not be reused")
+	require.Equal(t, int64(1), secondProbes.Load())
+}
+
+// A cached success must not survive the connection breaking.
+func TestConnectionCacheClearedWhenProbeFails(t *testing.T) {
+	t.Parallel()
+	var reject atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if reject.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/user" {
+			_, _ = w.Write([]byte(`{"login":"kandev"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	host := newConfigHost(map[string]any{"base_url": server.URL, "api_token": "t"})
+	runtime := NewRuntime()
+	runtime.SetHost(host)
+	require.Equal(t, true, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["connected"])
+
+	reject.Store(true)
+	failed := connectionAction(t, runtime, ActionConnectionTest, "workspace-1")
+	require.Equal(t, false, failed["connected"])
+	require.Contains(t, failed["message"], "rejected the access token")
+
+	// The next get must not resurrect the cached success.
+	after := connectionAction(t, runtime, ActionConnectionGet, "workspace-1")
+	require.Equal(t, false, after["connected"])
+}
+
+// Caching is keyed by workspace; without one the probe still answers.
+func TestConnectionStatusWorksWithoutAWorkspace(t *testing.T) {
+	t.Parallel()
+	server, probes := probeCountingServer(t, "1.27.3")
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{"base_url": server.URL, "api_token": "t"}))
+
+	for range 2 {
+		body := connectionAction(t, runtime, ActionConnectionGet, "")
+		require.Equal(t, true, body["connected"])
+		require.Nil(t, body["cached"])
+	}
+	require.Equal(t, int64(2), probes.Load(), "with no workspace there is nowhere to cache")
 }

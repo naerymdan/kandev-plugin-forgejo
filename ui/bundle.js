@@ -458,31 +458,55 @@ function createForgejoIcon(host) {
 function text2(value) {
   return typeof value === "string" ? value.trim() : "";
 }
+function operatorMessage(cause) {
+  if (typeof console !== "undefined") {
+    console.error("[kandev-plugin-forgejo] connection status request failed", cause);
+  }
+  return "Couldn't reach the Forgejo plugin. Check the Kandev server logs for details.";
+}
 function createConnectionPanel(host) {
-  return function ForgejoConnectionPanel() {
+  return function ForgejoConnectionPanel(props = {}) {
     const [status, setStatus] = host.React.useState(null);
     const [checking, setChecking] = host.React.useState(false);
     const [error, setError] = host.React.useState(null);
+    const [activeWorkspaceId, setActiveWorkspaceId] = host.React.useState(
+      () => host.context.getActiveWorkspaceId()
+    );
+    host.React.useEffect(
+      () => host.context.subscribeActiveWorkspace(setActiveWorkspaceId),
+      []
+    );
+    const workspaceId = text2(props.workspaceId) || text2(activeWorkspaceId) || "";
     const load = host.React.useCallback(
       async (probe, signal) => {
+        if (!workspaceId) {
+          setStatus(null);
+          setError(null);
+          setChecking(false);
+          return;
+        }
         setChecking(true);
         setError(null);
         try {
           const response = await host.api.invokeAction(
             probe ? "connection.test" : "connection.get",
-            {},
+            { workspaceId },
             { signal }
           );
-          if (!signal.aborted) setStatus(response);
+          if (signal.aborted) return;
+          setStatus(response);
+          host.setIntegrationEnabled?.(
+            "forgejo",
+            workspaceId,
+            response?.connected === true
+          );
         } catch (cause) {
-          if (!signal.aborted) {
-            setError(cause instanceof Error ? cause.message : "Could not read connection status.");
-          }
+          if (!signal.aborted) setError(operatorMessage(cause));
         } finally {
           if (!signal.aborted) setChecking(false);
         }
       },
-      []
+      [workspaceId]
     );
     host.React.useEffect(() => {
       const controller = new AbortController();
@@ -491,14 +515,33 @@ function createConnectionPanel(host) {
     }, [load]);
     const configured = status?.configured === true;
     const connected = status?.connected === true;
-    const detail = connected ? `Connected to ${text2(status?.instance_url)} as ${text2(status?.account)}` + (text2(status?.instance_version) ? ` (${text2(status?.flavor)} ${text2(status?.instance_version)})` : "") : text2(status?.message) || (configured ? "Not verified yet." : "Not configured.");
+    let detail;
+    if (!workspaceId) {
+      detail = "Open a workspace to check the Forgejo connection.";
+    } else if (connected) {
+      const version = text2(status?.instance_version);
+      const flavor = text2(status?.flavor);
+      detail = `Connected to ${text2(status?.instance_url)} as ${text2(status?.account)}` + (version ? ` (${flavor || "instance"} ${version})` : "");
+    } else {
+      detail = text2(status?.message) || (configured ? "Not verified yet." : "Not configured.");
+    }
     return host.jsx(
       "div",
       { className: "forgejo-connection" },
       host.jsx(
         "p",
-        { className: "forgejo-connection__state", "data-state": connected ? "connected" : "disconnected" },
+        {
+          className: "forgejo-connection__state",
+          "data-state": connected ? "connected" : "disconnected"
+        },
         detail
+      ),
+      // The connection is plugin-wide: one instance URL and token serve every
+      // workspace. Say so here rather than implying a per-workspace setting.
+      host.jsx(
+        "p",
+        { className: "forgejo-connection__scope" },
+        "This connection is shared by every workspace. Edit it at Settings > Plugins > Forgejo."
       ),
       error ? host.jsx("p", { className: "forgejo-connection__error", role: "alert" }, error) : null,
       host.jsx(
@@ -507,7 +550,7 @@ function createConnectionPanel(host) {
           type: "button",
           variant: "secondary",
           size: "sm",
-          disabled: checking,
+          disabled: checking || !workspaceId,
           onClick: () => {
             const controller = new AbortController();
             void load(true, controller.signal);
@@ -600,13 +643,15 @@ window.registerKandevPlugin(PLUGIN_ID, {
       parseReference: parsePullRequestReference,
       toChangeRequestDetail
     });
-    registry.registerIntegrationSettings({
-      id: PROVIDER_ID,
-      label: "Forgejo",
-      description: "Connect a Forgejo or Gitea instance for repositories, pull requests, and reviews.",
-      icon,
-      Component: createConnectionPanel(host)
-    });
+    if (typeof registry.registerIntegrationSettings === "function") {
+      registry.registerIntegrationSettings({
+        id: PROVIDER_ID,
+        label: "Forgejo",
+        description: "Connect a Forgejo or Gitea instance for repositories, pull requests, and reviews.",
+        icon,
+        Component: createConnectionPanel(host)
+      });
+    }
   },
   // initialize may run again in the same tab after a disable/enable cycle, so
   // destroy must leave no timers, listeners, or cached snapshots behind.
