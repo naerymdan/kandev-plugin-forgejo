@@ -20,11 +20,15 @@ built-in code hosts.
 | Integrations card | Connection status and a per-workspace enable switch the plugin renders itself. |
 | Review panel + CI popover | Review state, approval counts, individual commit statuses, and unresolved review comments, on desktop and mobile. |
 | Composer `#` references | Search pull requests from the composer; access is re-checked live at submit time. |
+| Agent tools (MCP) | Three tools on task sessions — read CI for a ref, tail a failing job's log, and get/open/ready the task's pull request. |
 
 ## Requirements
 
-- Kandev **0.88.0** or newer. The provider-neutral source-control contracts this
-  plugin builds on landed after `v0.87.1` and first shipped in `v0.88.0`.
+- Kandev **0.95.0** or newer, which is where plugin `agent_tools` are served over
+  Kandev's MCP endpoint. The source-control half alone needs only `v0.88.0`, and
+  a `0.88`–`0.94` host will happily run release `0.1.2`; it would also install
+  `0.2.0` and silently never show the agent tools, which is why the floor moved
+  rather than staying put.
 - **Gitea 1.20+** or **Forgejo 7.0+**, reachable from the Kandev backend and
   serving the REST v1 API at `<instance URL>/api/v1`. See "Supported versions"
   for what was tested and why the floor sits there.
@@ -122,6 +126,88 @@ itself still supports. Older Forgejo (the v1.x line) is untested.
 CI runs the same suite against the floor and the current release of each host on
 every change, and asserts the detected flavor matches the host under test. If
 the shared surface ever diverges, that matrix fails first.
+
+## Agent tools
+
+Task agents reach Forgejo through three MCP tools, exposed on the `kanban-task`
+surface as `kandev_kandev_plugin_forgejo_ci`, `…_ci_log` and `…_pr`. They exist
+to replace hand-written `curl` recipes in workflow step prompts — a PR step that
+had to scrape a token out of `~/.git-credentials` and hand-roll `/actions/runs`
+filtering can ask for `ci` instead.
+
+| Tool | Arguments | Answers |
+| --- | --- | --- |
+| `ci` | `ref` (branch or SHA), optional `repo` | Overall state (`success`/`failure`/`running`/`pending`/`none`) plus each job with a log id. |
+| `ci_log` | `job`, optional `lines` (default 200, max 2000), optional `repo` | The tail of that job's log, marked when earlier output was dropped. |
+| `pr` | `op` = `get` / `open` / `ready`, plus `head`, `base`, `title`, `body`, `draft`, `repo` | The task's pull request. `open` records the Kandev task association, so the review sidebar sees it too. |
+
+A few properties worth knowing before you write a prompt against them:
+
+- **`open` is idempotent.** Kandev never retries an agent tool — it cannot know
+  whether a side effect already landed — so `open` checks for an existing open
+  pull request on the same head first, and checks again if the create fails.
+  Calling it twice returns the same pull request, marked `already open`.
+- **`ready` is the draft flag Forgejo does not have.** REST v1 exposes no draft
+  boolean on either host, so a draft is a `WIP:` title prefix and `ready` is a
+  title edit. Readying an already-ready pull request sends nothing.
+- **`repo` is only needed for a task with more than one Forgejo repository.**
+  With several attached, the tools refuse rather than guess, and name them.
+- **They respect the workspace toggle.** With the integration switched off the
+  tools return an error and make no request to the instance.
+- **A ref with no CI reports `none`, not failure.** An agent must not read
+  "nothing ran" as "something broke".
+
+### What CI data you get, by version
+
+`ci` resolves through three surfaces and takes the first that answers, because
+this is where Forgejo and Gitea have genuinely diverged. Measured directly:
+
+| Endpoint | Gitea 1.20 | Gitea 1.24 | Gitea 1.27 | Forgejo 7 | Forgejo 13 | Forgejo 16 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `/actions/runs` | — | — | yes | — | yes | yes |
+| `/actions/runs/{id}/jobs` | — | — | yes | — | — | yes |
+| `/actions/tasks` | — | yes | yes | — | yes | yes |
+| `/actions/jobs/{id}/logs` | — | yes | yes | — | — | yes |
+| `/commits/{ref}/status` | yes | yes | yes | yes | yes | yes |
+
+Read from each release's own `swagger.v1.json` and confirmed against running
+instances. At the supported floor of either host there is no Actions API at
+all, and Forgejo 13 lists runs without serving their jobs or logs — so a chain
+that assumed one shape would be wrong on most of the range.
+
+The combined commit status is last and present everywhere. It is not only the
+floor fallback: it is the **only** surface that sees CI running outside the
+forge, which on self-hosted Forgejo is common — Woodpecker and Drone report
+there and appear in `ci` like any other check.
+
+Where a release serves no job logs, `ci_log` says so instead of implying the job
+id was wrong. Gitea answers an unknown job id with HTTP 500 rather than 404
+(measured on 1.24.7, against 404 on Forgejo 16.0.5); that is normalized on this
+one endpoint so an agent chases a stale job id instead of an imagined outage.
+
+### Context cost
+
+Every plugin tool is added to the agent's prompt and nothing can be removed to
+make room, so the set is deliberately three tools and the descriptions are
+written to be read once. Measured with Kandev's own estimator
+(`o200k_base:mcp-tool-json-v1`, the same one behind `EstimatedTokens` in the MCP
+attachment evidence):
+
+| Tool | Tokens |
+| --- | --- |
+| `ci` | 121 |
+| `ci_log` | 121 |
+| `pr` | 177 |
+| **Total** | **419** |
+
+For scale, Kandev's own `show_rich_output_kandev` is around 2k tokens by itself.
+No `output_schema` is declared: it would be shipped to every session for results
+that are already self-describing. `internal/plugin/manifest_test.go` holds a byte
+ceiling on the set so a future tool has to be argued for.
+
+Whether this is a net win depends on how much prompt text it lets you delete.
+Start an Autopilot task and read the recorded MCP attachment evidence, which
+reports per-tool `EstimatedTokens`, rather than taking the table above on faith.
 
 ## Connection scope
 
@@ -303,9 +389,11 @@ go test ./internal/forgejo -run TestLive -v
 ```
 
 `KANDEV_FORGEJO_EXPECT_FLAVOR=forgejo|gitea` additionally asserts flavor
-detection. The create test branches off a fresh head each run, so it is safe to
-re-run against a long-lived instance. Run the suite against Forgejo and Gitea
-containers before releasing; CI does this for all three supported versions.
+detection. The create and edit tests branch off a fresh head each run, so they
+are safe to re-run against a long-lived instance. `TestLiveActionsSurfaceMatrix`
+prints which Actions endpoints the instance serves, which is the table under
+"What CI data you get, by version". Run the suite against Forgejo and Gitea
+containers before releasing; CI does this across the supported range.
 
 ## Layout
 
@@ -313,8 +401,8 @@ containers before releasing; CI does this for all three supported versions.
 | --- | --- |
 | `manifest.yaml` | The declarative host contract: actions, provider ownership, reference source, capabilities, config schema. |
 | `internal/sourcecontrol/` | The provider-neutral source-control recipe — the Kandev boundary. Adapted from `kandev-plugin-template`. |
-| `internal/forgejo/` | Concrete Forgejo/Gitea adapters: REST client, repositories, pull requests, reviews, references, associations. |
-| `internal/plugin/` | Wires the adapters into the extension and owns the connection actions. |
+| `internal/forgejo/` | Concrete Forgejo/Gitea adapters: REST client, repositories, pull requests, reviews, references, associations, and the Actions/CI resolution chain. |
+| `internal/plugin/` | Wires the adapters into the extension, owns the connection actions, and serves the agent tools. |
 | `ui/src/` | The browser half: the recipe registration plus the Forgejo icon, reference parsing, detail adapter, and connection panel. |
 | `server/` | The `pluginsdk.Serve` entry point Kandev spawns. |
 
