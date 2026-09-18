@@ -1,9 +1,10 @@
 .PHONY: build run test test-backend test-ui typecheck fmt vet lint \
 	package package-host verify-package verify-package-host clean
 
-# Keep BIN and VERSION in sync with manifest.yaml's id and version.
+# VERSION is read from manifest.yaml so the packaged asset name cannot drift
+# from the version the release workflow gates the tag against.
 BIN := bin/kandev-plugin-forgejo
-VERSION := 0.1.0
+VERSION := $(shell sed -n 's/^version: *"\(.*\)"/\1/p' manifest.yaml | head -1)
 STAGE := .build/stage
 PKG_OUT := kandev-plugin-forgejo-$(VERSION).tar.gz
 
