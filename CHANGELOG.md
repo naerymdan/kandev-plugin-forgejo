@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.1
+
+- The workspace integrations panel invoked its actions without a `workspaceId`.
+  Every action is `scope: "workspace"`, so Kandev rejected each call at the
+  envelope before it reached the plugin process; the panel then showed "not
+  configured" and surfaced the raw host error, against a backend that was
+  working. It now uses the workspace the host routes to it, falls back to the
+  active workspace, and makes no call when neither resolves.
+- `connection.get` always reported `connected: false` because it never probed,
+  so the panel read as disconnected on every mount even right after a
+  successful **Test connection**. It now serves a probe result cached per
+  workspace for 60s and probes when that is stale. The cache is bound to the
+  configured instance URL and dropped when a probe fails.
+- Host and transport errors are no longer shown verbatim. The panel renders one
+  actionable sentence and logs the cause to the console.
+- Publishes the integration's enabled state per workspace via
+  `host.setIntegrationEnabled`, which drives Kandev's enabled badge.
+- `registerIntegrationSettings` is behind a capability check, so a host without
+  that hook cannot abort `initialize` and lose the source-control registrations.
+- Release binaries are built with `-trimpath -ldflags="-s -w"`: the package drops
+  from 50.6 MB to 27.8 MB, and binaries no longer embed the build machine's
+  filesystem paths. Panic traces keep function names and line numbers.
+- Documents the HTTP install/config/action surface for headless setups, and
+  states explicitly that one connection is shared by every workspace.
+
 ## 0.1.0
 
 Initial release.

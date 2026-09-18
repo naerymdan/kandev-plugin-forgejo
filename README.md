@@ -149,13 +149,14 @@ this plugin's.
 ```sh
 KANDEV=https://kandev.example.com
 ID=kandev-plugin-forgejo
+VERSION=0.1.1
 
 # Install from a local package...
-curl -sf -X POST "$KANDEV/api/plugins/install" -F "package=@$ID-0.1.0.tar.gz"
+curl -sf -X POST "$KANDEV/api/plugins/install" -F "package=@$ID-$VERSION.tar.gz"
 # ...or straight from a release URL.
 curl -sf -X POST "$KANDEV/api/plugins/install" \
   -H 'Content-Type: application/json' \
-  -d '{"url":"https://github.com/naerymdan/kandev-plugin-forgejo/releases/download/v0.1.0/'"$ID"'-0.1.0.tar.gz"}'
+  -d "{\"url\":\"https://github.com/naerymdan/$ID/releases/download/v$VERSION/$ID-$VERSION.tar.gz\"}"
 
 # Configure. The `config` wrapper is required: a flat body is rejected with a
 # misleading `missing required field "base_url"`.
