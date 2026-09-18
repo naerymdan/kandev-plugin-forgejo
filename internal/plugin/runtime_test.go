@@ -386,3 +386,144 @@ func TestConnectionStatusWorksWithoutAWorkspace(t *testing.T) {
 	}
 	require.Equal(t, int64(2), probes.Load(), "with no workspace there is nowhere to cache")
 }
+
+func setEnabled(t *testing.T, runtime *Runtime, workspaceID string, enabled bool) map[string]any {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"enabled": enabled})
+	response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionConnectionSetEnabled,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: workspaceID},
+		Body:      body,
+	})
+	require.NoError(t, err)
+	return decodeBody(t, response)
+}
+
+// Installing the plugin is the opt-in: a workspace with no stored choice is on.
+func TestIntegrationIsEnabledByDefault(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+
+	body := connectionAction(t, runtime, ActionConnectionGet, "workspace-1")
+	require.Equal(t, true, body["enabled"])
+}
+
+func TestSetEnabledRoundTrips(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+
+	require.Equal(t, false, setEnabled(t, runtime, "workspace-1", false)["enabled"])
+	require.Equal(t, false, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["enabled"])
+
+	require.Equal(t, true, setEnabled(t, runtime, "workspace-1", true)["enabled"])
+	require.Equal(t, true, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["enabled"])
+}
+
+// The choice is per workspace: turning it off in one must not affect another.
+func TestEnabledStateIsPerWorkspace(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+
+	setEnabled(t, runtime, "workspace-1", false)
+	require.Equal(t, false, connectionAction(t, runtime, ActionConnectionGet, "workspace-1")["enabled"])
+	require.Equal(t, true, connectionAction(t, runtime, ActionConnectionGet, "workspace-2")["enabled"])
+}
+
+// The toggle must withdraw the integration, not just move a badge.
+func TestDisabledWorkspaceWithdrawsSourceControl(t *testing.T) {
+	t.Parallel()
+	server, probes := probeCountingServer(t, "1.27.3")
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{"base_url": server.URL, "api_token": "t"}))
+	setEnabled(t, runtime, "workspace-1", false)
+	before := probes.Load()
+
+	for _, testCase := range []struct {
+		action string
+		field  string
+	}{
+		{action: sourcecontrol.ActionRepositoriesList, field: "repositories"},
+		{action: sourcecontrol.ActionRepositoriesBranches, field: "branches"},
+		{action: sourcecontrol.ActionChangeRequestsGet, field: "reviews"},
+		{action: sourcecontrol.ActionChangeRequestAssociations, field: "associations"},
+	} {
+		response, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+			ActionKey: testCase.action,
+			Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+			Body:      []byte(`{}`),
+		})
+		require.NoError(t, err, testCase.action)
+		require.Empty(t, decodeBody(t, response)[testCase.field], testCase.action)
+	}
+
+	inspect, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: sourcecontrol.ActionRepositoriesInspect,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      []byte(`{"url":"https://example.com/a/b"}`),
+	})
+	require.NoError(t, err)
+	require.Nil(t, decodeBody(t, inspect)["repository"])
+
+	require.Equal(t, before, probes.Load(), "a disabled workspace must not reach the instance")
+}
+
+// Reads go quiet, but a mutation says no rather than silently doing nothing.
+func TestDisabledWorkspaceRefusesMutations(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+	setEnabled(t, runtime, "workspace-1", false)
+
+	for _, action := range []string{
+		sourcecontrol.ActionChangeRequestsCreate,
+		sourcecontrol.ActionChangeRequestsLink,
+		sourcecontrol.ActionChangeRequestsUnlink,
+	} {
+		_, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+			ActionKey: action,
+			Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+			Body:      []byte(`{}`),
+		})
+		require.ErrorContains(t, err, "turned off for this workspace", action)
+	}
+}
+
+// Re-enabling restores the provider.
+func TestReEnablingRestoresSourceControl(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+	setEnabled(t, runtime, "workspace-1", false)
+	setEnabled(t, runtime, "workspace-1", true)
+
+	// Enabled but unconfigured: the recipe's own guard fires, which proves the
+	// request reached the extension instead of the disabled short-circuit.
+	_, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: sourcecontrol.ActionRepositoriesList,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      []byte(`{}`),
+	})
+	require.ErrorContains(t, err, "resolve connection scope")
+}
+
+func TestSetEnabledValidatesInput(t *testing.T) {
+	t.Parallel()
+	runtime := NewRuntime()
+	runtime.SetHost(newConfigHost(map[string]any{}))
+
+	_, err := runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionConnectionSetEnabled,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      []byte(`{}`),
+	})
+	require.ErrorContains(t, err, "enabled is required")
+
+	_, err = runtime.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionConnectionSetEnabled,
+		Body:      []byte(`{"enabled":true}`),
+	})
+	require.ErrorContains(t, err, "requires a verified workspace")
+}

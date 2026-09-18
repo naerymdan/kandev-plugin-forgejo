@@ -477,6 +477,32 @@ function createConnectionPanel(host) {
       []
     );
     const workspaceId = text2(props.workspaceId) || text2(activeWorkspaceId) || "";
+    const publishEnabled = host.React.useCallback(
+      (scopeId, value) => {
+        host.setIntegrationEnabled?.("forgejo", scopeId, value);
+      },
+      []
+    );
+    const setEnabled = host.React.useCallback(
+      async (next) => {
+        if (!workspaceId) return;
+        setStatus((current) => ({ ...current ?? {}, enabled: next }));
+        publishEnabled(workspaceId, next);
+        const controller = new AbortController();
+        try {
+          await host.api.invokeAction(
+            "connection.set_enabled",
+            { workspaceId, body: { enabled: next } },
+            { signal: controller.signal }
+          );
+        } catch (cause) {
+          setStatus((current) => ({ ...current ?? {}, enabled: !next }));
+          publishEnabled(workspaceId, !next);
+          setError(operatorMessage(cause));
+        }
+      },
+      [workspaceId, publishEnabled]
+    );
     const load = host.React.useCallback(
       async (probe, signal) => {
         if (!workspaceId) {
@@ -495,11 +521,7 @@ function createConnectionPanel(host) {
           );
           if (signal.aborted) return;
           setStatus(response);
-          host.setIntegrationEnabled?.(
-            "forgejo",
-            workspaceId,
-            response?.connected === true
-          );
+          publishEnabled(workspaceId, response?.enabled !== false);
         } catch (cause) {
           if (!signal.aborted) setError(operatorMessage(cause));
         } finally {
@@ -515,6 +537,7 @@ function createConnectionPanel(host) {
     }, [load]);
     const configured = status?.configured === true;
     const connected = status?.connected === true;
+    const enabled = status?.enabled !== false;
     let detail;
     if (!workspaceId) {
       detail = "Open a workspace to check the Forgejo connection.";
@@ -544,6 +567,17 @@ function createConnectionPanel(host) {
         "This connection is shared by every workspace. Edit it at Settings > Plugins > Forgejo."
       ),
       error ? host.jsx("p", { className: "forgejo-connection__error", role: "alert" }, error) : null,
+      host.jsx(
+        "label",
+        { className: "forgejo-connection__toggle" },
+        host.jsx(host.ui.Switch, {
+          checked: enabled,
+          disabled: !workspaceId,
+          "aria-label": "Enable Forgejo for this workspace",
+          onCheckedChange: (next) => void setEnabled(next)
+        }),
+        host.jsx("span", null, enabled ? "Enabled for this workspace" : "Disabled for this workspace")
+      ),
       host.jsx(
         host.ui.Button,
         {

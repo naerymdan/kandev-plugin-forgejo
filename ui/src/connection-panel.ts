@@ -1,6 +1,7 @@
 import type { Component, PluginHostApi } from "@kandev/plugin-sdk";
 
 type ConnectionStatus = {
+  enabled?: unknown;
   configured?: unknown;
   connected?: unknown;
   instance_url?: unknown;
@@ -33,8 +34,14 @@ function operatorMessage(cause: unknown): string {
  *
  * The credentials themselves live in the manifest's `config_schema` and are
  * edited at Settings > Plugins > Forgejo; this panel never renders or collects
- * a token. It reports what the backend derived, and publishes the result to the
- * host so the per-workspace "Enabled" badge reflects it.
+ * a token. It reports what the backend derived.
+ *
+ * Kandev does not supply an enable/disable control for a plugin integration --
+ * a plugin that wants one renders it here and publishes the result with
+ * `host.setIntegrationEnabled` so the host's badge follows. The choice is
+ * stored per workspace on the backend, which also honors it, so turning this
+ * off genuinely withdraws the integration from the workspace instead of only
+ * moving a badge.
  */
 export function createConnectionPanel(host: PluginHostApi): Component<{ workspaceId?: string }> {
   return function ForgejoConnectionPanel(props: { workspaceId?: string } = {}) {
@@ -52,6 +59,39 @@ export function createConnectionPanel(host: PluginHostApi): Component<{ workspac
       [],
     );
     const workspaceId = text(props.workspaceId) || text(activeWorkspaceId) || "";
+
+    const publishEnabled = host.React.useCallback(
+      (scopeId: string, value: boolean) => {
+        // Optional: a host predating this API must not break the panel.
+        host.setIntegrationEnabled?.("forgejo", scopeId, value);
+      },
+      [],
+    );
+
+    const setEnabled = host.React.useCallback(
+      async (next: boolean) => {
+        if (!workspaceId) return;
+        // Reflect the choice immediately; the badge and the panel should not
+        // wait on a round trip.
+        setStatus((current: ConnectionStatus | null) => ({ ...(current ?? {}), enabled: next }));
+        publishEnabled(workspaceId, next);
+        const controller = new AbortController();
+        try {
+          await host.api.invokeAction(
+            "connection.set_enabled",
+            { workspaceId, body: { enabled: next } },
+            { signal: controller.signal },
+          );
+        } catch (cause) {
+          // The write failed, so put the control back where it was rather
+          // than leaving the UI claiming something the backend did not store.
+          setStatus((current: ConnectionStatus | null) => ({ ...(current ?? {}), enabled: !next }));
+          publishEnabled(workspaceId, !next);
+          setError(operatorMessage(cause));
+        }
+      },
+      [workspaceId, publishEnabled],
+    );
 
     const load = host.React.useCallback(
       async (probe: boolean, signal: AbortSignal) => {
@@ -74,11 +114,7 @@ export function createConnectionPanel(host: PluginHostApi): Component<{ workspac
           );
           if (signal.aborted) return;
           setStatus(response);
-          host.setIntegrationEnabled?.(
-            "forgejo",
-            workspaceId,
-            response?.connected === true,
-          );
+          publishEnabled(workspaceId, response?.enabled !== false);
         } catch (cause) {
           if (!signal.aborted) setError(operatorMessage(cause));
         } finally {
@@ -98,6 +134,7 @@ export function createConnectionPanel(host: PluginHostApi): Component<{ workspac
 
     const configured = status?.configured === true;
     const connected = status?.connected === true;
+    const enabled = status?.enabled !== false;
 
     let detail: string;
     if (!workspaceId) {
@@ -133,6 +170,17 @@ export function createConnectionPanel(host: PluginHostApi): Component<{ workspac
         "This connection is shared by every workspace. Edit it at Settings > Plugins > Forgejo.",
       ),
       error ? host.jsx("p", { className: "forgejo-connection__error", role: "alert" }, error) : null,
+      host.jsx(
+        "label",
+        { className: "forgejo-connection__toggle" },
+        host.jsx(host.ui.Switch, {
+          checked: enabled,
+          disabled: !workspaceId,
+          "aria-label": "Enable Forgejo for this workspace",
+          onCheckedChange: (next: boolean) => void setEnabled(next),
+        }),
+        host.jsx("span", null, enabled ? "Enabled for this workspace" : "Disabled for this workspace"),
+      ),
       host.jsx(
         host.ui.Button,
         {

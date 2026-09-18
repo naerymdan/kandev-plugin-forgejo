@@ -17,6 +17,7 @@ built-in code hosts.
 | Create PR dialog | Opens a pull request from the task's verified worktree branch. Draft is honored with the portable `WIP:` title marker. |
 | Task **Link** menu | A "Forgejo pull request" entry that accepts a pull-request URL or `owner/repo#number`. |
 | Sidebar / Kanban / list glyphs | Pull-request status per task, from one workspace-level association map. |
+| Integrations card | Connection status and a per-workspace enable switch the plugin renders itself. |
 | Review panel + CI popover | Review state, approval counts, individual commit statuses, and unresolved review comments, on desktop and mobile. |
 | Composer `#` references | Search pull requests from the composer; access is re-checked live at submit time. |
 
@@ -140,6 +141,44 @@ plugin does not support that today. It would mean moving the connection out of
 `config_schema` and into workspace-scoped Host state and secrets, with explicit
 save and disconnect actions — a deliberate change, not a configuration option.
 
+## Enabling and disabling per workspace
+
+The integrations card carries its own **enable** switch. Kandev does not render
+one for a plugin integration — native integrations get theirs from the host, and
+a plugin that wants parity has to supply it and publish the result with
+`host.setIntegrationEnabled`. That is why this card had no toggle before 0.1.2.
+
+The switch is not decorative. The choice is stored per workspace on the backend,
+which honors it: while an integration is off, repository, branch, review and
+association reads return nothing, so the native pickers render empty instead of
+showing a provider the operator turned off, and pull-request create, link and
+unlink refuse outright rather than silently doing nothing. Turning it back on
+restores everything. A workspace with no stored choice is enabled — installing
+the plugin is the opt-in.
+
+Disabling is not uninstalling: config, credentials and stored task links all
+survive, and the plugin stays installed for other workspaces.
+
+## The "unsigned" badge
+
+Every plugin shows as unsigned at **Settings → Plugins**, first-party ones
+included. It is not a property of this package.
+
+Kandev marks an install signed only when the package carries a
+`checksums.txt.sig` **and** the host has a signature verifier wired
+(`pkgtar.VerifySignature`). That hook is nil in the shipped product — it is
+assigned only in the host's own tests — so the check short-circuits before any
+signature is examined and every install is reported unsigned. The host is
+deliberately honest here: it declines to claim a guarantee nothing verified.
+
+This package therefore ships no `checksums.txt.sig`, and that is deliberate.
+Adding one would not change the badge today, and it would add risk: a present
+signature that fails verification fails the install outright, so a package
+signed against one key would stop installing the day a host wires a verifier
+expecting another. The archive's internal `checksums.txt` is still generated and
+enforced on install, which detects corruption; it does not prove provenance.
+Release provenance comes from the signed git tag and the GitHub release.
+
 ## Headless install and configuration
 
 The UI flow above is the normal path. Everything it does is reachable over HTTP,
@@ -149,7 +188,7 @@ this plugin's.
 ```sh
 KANDEV=https://kandev.example.com
 ID=kandev-plugin-forgejo
-VERSION=0.1.1
+VERSION=0.1.2
 
 # Install from a local package...
 curl -sf -X POST "$KANDEV/api/plugins/install" -F "package=@$ID-$VERSION.tar.gz"
@@ -181,6 +220,7 @@ Action bodies:
 | Action | Body |
 | --- | --- |
 | `connection.get` / `connection.test` | none |
+| `connection.set_enabled` | `{"enabled":true}` |
 | `repositories.list` | `{"query":"","cursor":"","limit":100}` |
 | `repositories.inspect` | `{"url":"https://forgejo.example.com/owner/repo"}` |
 | `repositories.branches` | `{"repository":{…full descriptor…}}` — a flat identity is rejected |

@@ -26,6 +26,13 @@
   color: var(--muted-foreground, inherit);
 }
 
+.forgejo-connection__toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}
+
 .forgejo-connection__error {
   margin: 0;
   font-size: 0.875rem;

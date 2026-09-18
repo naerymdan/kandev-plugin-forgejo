@@ -28,7 +28,16 @@ const (
 	ActionConnectionGet = "connection.get"
 	// ActionConnectionTest validates the configured URL and token live.
 	ActionConnectionTest = "connection.test"
+	// ActionConnectionSetEnabled records the operator's per-workspace
+	// enable/disable choice for this integration.
+	ActionConnectionSetEnabled = "connection.set_enabled"
 )
+
+// enabledStateKey stores the per-workspace enable/disable choice. Kandev does
+// not render an enable toggle for a plugin integration, so the plugin owns
+// both the control and its meaning. Absent means enabled: installing the
+// plugin is itself the opt-in.
+const enabledStateKey = "integration_enabled"
 
 // Runtime is the plugin value passed to pluginsdk.Serve. It embeds
 // UnimplementedPlugin for no-op event/webhook defaults and delegates the
@@ -83,7 +92,19 @@ func (r *Runtime) HandleAction(ctx context.Context, request *pluginsdk.PluginAct
 		return r.connectionStatus(ctx, request.Context.WorkspaceID, false)
 	case ActionConnectionTest:
 		return r.connectionStatus(ctx, request.Context.WorkspaceID, true)
+	case ActionConnectionSetEnabled:
+		return r.setEnabled(ctx, request)
 	default:
+		// A disabled integration contributes nothing to its workspace. The
+		// toggle would otherwise be decorative: it would move a badge while
+		// repositories, reviews and references kept flowing.
+		enabled, err := r.integrationEnabled(ctx, request.Context.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		if !enabled {
+			return disabledResponse(request.ActionKey)
+		}
 		return r.extension.HandleAction(ctx, request)
 	}
 }
@@ -115,6 +136,9 @@ const connectionStatusTTL = 60 * time.Second
 // never includes the token or any credential-bearing URL.
 func (r *Runtime) connectionStatus(ctx context.Context, workspaceID string, force bool) (*pluginsdk.PluginActionResponse, error) {
 	status := map[string]any{"provider": ProviderID, "configured": false, "connected": false}
+	if enabled, err := r.integrationEnabled(ctx, workspaceID); err == nil {
+		status["enabled"] = enabled
+	}
 
 	client, err := r.connection.Client(ctx)
 	if err != nil {
@@ -154,6 +178,73 @@ func (r *Runtime) connectionStatus(ctx context.Context, workspaceID string, forc
 	}
 	r.storeConnectionCache(ctx, workspaceID, client.Scope(), probed)
 	return jsonResponse(status)
+}
+
+// setEnabled records the operator's choice for one workspace.
+func (r *Runtime) setEnabled(ctx context.Context, request *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	workspaceID := strings.TrimSpace(request.Context.WorkspaceID)
+	if workspaceID == "" {
+		return nil, errors.New("kandev-plugin-forgejo: enabling requires a verified workspace")
+	}
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(request.Body, &input); err != nil {
+		return nil, fmt.Errorf("kandev-plugin-forgejo: decode enabled body: %w", err)
+	}
+	if input.Enabled == nil {
+		return nil, errors.New("kandev-plugin-forgejo: enabled is required")
+	}
+	host := r.Host()
+	if host == nil {
+		return nil, errors.New("kandev-plugin-forgejo: host is unavailable")
+	}
+	if err := host.SetState(ctx, "workspace", workspaceID, enabledStateKey, map[string]any{
+		"enabled": *input.Enabled,
+	}); err != nil {
+		return nil, fmt.Errorf("kandev-plugin-forgejo: store enabled state: %w", err)
+	}
+	return jsonResponse(map[string]any{"provider": ProviderID, "enabled": *input.Enabled})
+}
+
+// integrationEnabled reports whether this integration is on for a workspace.
+// It fails open: a state read problem must not silently disable a working
+// integration.
+func (r *Runtime) integrationEnabled(ctx context.Context, workspaceID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	host := r.Host()
+	if host == nil || strings.TrimSpace(workspaceID) == "" {
+		return true, nil
+	}
+	value, found, err := host.GetState(ctx, "workspace", workspaceID, enabledStateKey)
+	if err != nil || !found || value == nil {
+		return true, nil
+	}
+	enabled, ok := value["enabled"].(bool)
+	return !ok || enabled, nil
+}
+
+// disabledResponse answers a source-control action for a workspace where the
+// operator turned this integration off. Reads return nothing so native
+// surfaces render empty rather than erroring; mutations refuse, because
+// silently dropping a create or a link would be worse than saying no.
+func disabledResponse(actionKey string) (*pluginsdk.PluginActionResponse, error) {
+	switch actionKey {
+	case sourcecontrol.ActionRepositoriesList:
+		return jsonResponse(map[string]any{"repositories": []any{}})
+	case sourcecontrol.ActionRepositoriesInspect:
+		return jsonResponse(map[string]any{"repository": nil})
+	case sourcecontrol.ActionRepositoriesBranches:
+		return jsonResponse(map[string]any{"branches": []any{}})
+	case sourcecontrol.ActionChangeRequestsGet:
+		return jsonResponse(map[string]any{"reviews": []any{}})
+	case sourcecontrol.ActionChangeRequestAssociations:
+		return jsonResponse(map[string]any{"associations": []any{}})
+	default:
+		return nil, errors.New("kandev-plugin-forgejo: the Forgejo integration is turned off for this workspace")
+	}
 }
 
 // probeConnection performs the live check: who the token acts as, and what the

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.2
+
+- The integrations card now renders its own enable/disable switch. Kandev does
+  not supply one for a plugin integration, which is why this card had no toggle
+  while native integrations did.
+- The switch is honored, not decorative. The choice is stored per workspace and
+  the backend enforces it: while off, repository, branch, review and association
+  reads return nothing and pull-request create/link/unlink refuse. A workspace
+  with no stored choice is enabled.
+- Adds the `connection.set_enabled` action, and `connection.get` now reports
+  `enabled` alongside connection state.
+
 ## 0.1.1
 
 - The workspace integrations panel invoked its actions without a `workspaceId`.

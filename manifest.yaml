@@ -4,7 +4,7 @@
 # catalog entry. Keep all four in sync when renaming.
 id: "kandev-plugin-forgejo"
 api_version: 1
-version: "0.1.1"
+version: "0.1.2"
 display_name: "Forgejo"
 description: "Connect a self-hosted Forgejo or Gitea instance to native Kandev repository, pull-request, task-link, and review workflows."
 author: "naerymdan"
@@ -40,6 +40,9 @@ actions:
     scope: "workspace"
     max_body_bytes: 1024
   - key: "connection.test"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "connection.set_enabled"
     scope: "workspace"
     max_body_bytes: 1024
   - key: "repositories.list"

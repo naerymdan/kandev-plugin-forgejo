@@ -13,13 +13,17 @@ function makeHost(overrides: Record<string, any> = {}) {
       useState(initial: unknown) {
         const i = cursor++;
         if (!(i in state)) state[i] = typeof initial === "function" ? (initial as any)() : initial;
-        return [state[i], (v: unknown) => { state[i] = v; }];
+        return [state[i], (v: unknown) => { state[i] = typeof v === "function" ? (v as any)(state[i]) : v; }];
       },
       useEffect(fn: () => void | (() => void)) { effects.push(fn); },
       useCallback: (fn: unknown) => fn,
     },
-    ui: { Button: "button" },
-    api: { invokeAction: vi.fn().mockResolvedValue({ configured: true, connected: true, account: "kandev" }) },
+    ui: { Button: "button", Switch: "switch" },
+    api: {
+      invokeAction: vi
+        .fn()
+        .mockResolvedValue({ configured: true, connected: true, enabled: true, account: "kandev" }),
+    },
     context: {
       getActiveWorkspaceId: () => undefined,
       subscribeActiveWorkspace: () => () => {},
@@ -86,6 +90,74 @@ describe("connection panel", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(host.setIntegrationEnabled).toHaveBeenCalledWith("forgejo", "workspace-1", true);
+  });
+
+  // Kandev renders no enable control for a plugin integration; the plugin has
+  // to provide one itself, which is why the Forgejo card had no toggle while
+  // native integrations did.
+  it("renders its own enable toggle", () => {
+    const { render } = makeHost();
+    const rendered = JSON.stringify(render({ workspaceId: "workspace-1" }));
+    expect(rendered).toContain("switch");
+    expect(rendered).toContain("Enable Forgejo for this workspace");
+  });
+
+  it("persists a toggle change and republishes the badge", async () => {
+    const { host, render } = makeHost();
+    const tree: any = render({ workspaceId: "workspace-1" });
+    await Promise.resolve();
+
+    const toggle = JSON.parse(JSON.stringify(tree)); // structure only
+    expect(JSON.stringify(toggle)).toContain("switch");
+
+    // Drive the handler the way the Switch would.
+    const findSwitch = (node: any): any => {
+      if (!node || typeof node !== "object") return null;
+      if (node.type === "switch") return node;
+      for (const child of node.children ?? []) {
+        const hit = findSwitch(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const node = findSwitch(tree);
+    expect(node).toBeTruthy();
+    await node.props.onCheckedChange(false);
+    await Promise.resolve();
+
+    expect(host.api.invokeAction).toHaveBeenCalledWith(
+      "connection.set_enabled",
+      { workspaceId: "workspace-1", body: { enabled: false } },
+      expect.anything(),
+    );
+    expect(host.setIntegrationEnabled).toHaveBeenLastCalledWith("forgejo", "workspace-1", false);
+  });
+
+  // A failed write must not leave the UI claiming state the backend rejected.
+  it("reverts the toggle when persisting fails", async () => {
+    const invokeAction = vi
+      .fn()
+      .mockResolvedValueOnce({ configured: true, connected: true, enabled: true })
+      .mockRejectedValueOnce(new Error("boom"));
+    const { host, render } = makeHost({ api: { invokeAction } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const tree: any = render({ workspaceId: "workspace-1" });
+    await Promise.resolve();
+    const findSwitch = (node: any): any => {
+      if (!node || typeof node !== "object") return null;
+      if (node.type === "switch") return node;
+      for (const child of node.children ?? []) {
+        const hit = findSwitch(child);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    await findSwitch(tree).props.onCheckedChange(false);
+    await Promise.resolve();
+
+    expect(host.setIntegrationEnabled).toHaveBeenLastCalledWith("forgejo", "workspace-1", true);
+    errorSpy.mockRestore();
   });
 
   // Regression: host envelope errors named the wrong actor and read as though

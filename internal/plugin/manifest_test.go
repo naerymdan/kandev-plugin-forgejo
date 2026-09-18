@@ -96,12 +96,13 @@ func TestManifestDeclaresEveryRoutedAction(t *testing.T) {
 		sourcecontrol.ActionChangeRequestAssociations: "workspace",
 		ActionConnectionGet:                           "workspace",
 		ActionConnectionTest:                          "workspace",
+		ActionConnectionSetEnabled:                    "workspace",
 	} {
 		scope, ok := declared[key]
 		require.True(t, ok, "manifest does not declare routed action %q", key)
 		require.Equal(t, wantScope, scope, "action %q has the wrong scope", key)
 	}
-	require.Len(t, parsed.Actions, 10, "an undeclared or stale action entry drifted from the routed set")
+	require.Len(t, parsed.Actions, 11, "an undeclared or stale action entry drifted from the routed set")
 }
 
 // The source-control contracts first shipped in v0.88.0. A lower floor would
