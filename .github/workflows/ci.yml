@@ -1,5 +1,10 @@
 name: CI
 
+# Actions are pinned by commit SHA with the tag in a trailing comment: a tag can
+# be moved, a SHA cannot, and this is third-party code with access to the build.
+# The runner is pinned too — `ubuntu-latest` migrates to Ubuntu 26 on 2026-10-19,
+# and a runner change should be a commit that CI votes on, not a date that passes.
+
 on:
   push:
     branches: [main]
@@ -7,27 +12,27 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Check out plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: kandev-plugin-forgejo
 
       # The SDK is not a standalone module yet, so the build needs a sibling
       # kandev checkout (see README, "Development").
       - name: Check out kandev SDK
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kdlbs/kandev
           path: kandev
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26"
           cache-dependency-path: kandev-plugin-forgejo/go.sum
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
 
@@ -67,7 +72,7 @@ jobs:
   # The live contract tests run against real instances of both hosts, at the
   # floor and the current release of each.
   live:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -87,14 +92,14 @@ jobs:
             binary: forgejo
             image: codeberg.org/forgejo/forgejo:16
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: kandev-plugin-forgejo
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kdlbs/kandev
           path: kandev
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26"
           cache-dependency-path: kandev-plugin-forgejo/go.sum
