@@ -46,12 +46,6 @@ func NewConnection(hosts HostProvider) *Connection {
 	}
 }
 
-// WithHTTPClient overrides the transport. Tests use it to point at a fake.
-func (c *Connection) WithHTTPClient(client *http.Client) *Connection {
-	c.httpClient = client
-	return c
-}
-
 // Client resolves the configured instance client, rebuilding it when the
 // operator config has changed since the last call.
 func (c *Connection) Client(ctx context.Context) (*Client, error) {

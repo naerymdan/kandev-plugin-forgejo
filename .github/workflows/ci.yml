@@ -64,17 +64,16 @@ jobs:
         working-directory: kandev-plugin-forgejo
         run: make verify-package
 
-  # The live contract tests are what back this plugin's "works on both" claim,
-  # so they run against a real Forgejo and a real Gitea on every change.
+  # The live contract tests run against real instances of both hosts, at the
+  # floor and the current release of each.
   live:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The declared floor and the current release of each host. The floor
-          # entries are the ones that matter: they are what the README's
-          # supported range promises, so a regression there is a broken promise.
+          # The floor and the current release of each host. The floor entries
+          # are the versions README.md's supported range promises.
           - flavor: gitea
             binary: gitea
             image: gitea/gitea:1.20

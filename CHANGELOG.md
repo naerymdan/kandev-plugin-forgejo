@@ -14,12 +14,13 @@ Initial release.
   and unresolved review comments, plus a workspace-level association map.
 - Composer `#` pull-request references with fail-closed submit-time
   authorization.
-- Flavor detection probes Forgejo's `/api/forgejo/v1` namespace rather than
-  matching the `+gitea-` version suffix, so it survives further divergence.
-- Documents the four token scopes the plugin actually needs. `read:user` and
-  `read:issue` were missing from the first draft: without them the connection
-  test reports "not connected" and the composer `#` picker returns nothing,
-  even though everything else works.
+- Distinguishes Forgejo from Gitea by probing Forgejo's `/api/forgejo/v1`
+  namespace, so the label survives Forgejo dropping its `+gitea-` version
+  suffix. Display only; no behavior branches on it.
+- Requires a token with `read:repository`, `read:user` and `read:issue`, plus
+  `write:repository` to open pull requests. Without `read:user` the connection
+  test reports "not connected"; without `read:issue` the composer `#` picker
+  returns nothing.
 - Declares a supported floor of Gitea 1.20 / Forgejo 7.0. The floor is a
   token-scope boundary, not a capability one: Gitea ≤1.18 has no scope system
   (tokens carry full account access), and 1.19 uses an incompatible vocabulary

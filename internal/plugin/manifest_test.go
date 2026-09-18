@@ -104,8 +104,8 @@ func TestManifestDeclaresEveryRoutedAction(t *testing.T) {
 	require.Len(t, parsed.Actions, 10, "an undeclared or stale action entry drifted from the routed set")
 }
 
-// These contracts first shipped in v0.88.0; the base template's 0.86.0 floor
-// would let the plugin install onto a host that cannot serve it.
+// The source-control contracts first shipped in v0.88.0. A lower floor would
+// let the plugin install onto a host that cannot serve it.
 func TestManifestPinsContractFloor(t *testing.T) {
 	t.Parallel()
 	parsed := loadManifest(t)

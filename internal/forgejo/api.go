@@ -10,8 +10,8 @@ import (
 )
 
 // The DTOs below carry only the fields this plugin actually reads, and only
-// fields Forgejo and Gitea both populate. They were verified against Forgejo
-// 13.0.5 and Gitea 1.24.7; see README.md "Verified against".
+// fields Forgejo and Gitea both populate. README.md "Verified against" records
+// which releases that has been checked on.
 
 // User is the subset of a Forgejo user this plugin displays.
 type User struct {

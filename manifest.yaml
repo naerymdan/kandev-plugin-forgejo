@@ -13,8 +13,7 @@ repo_url: "https://github.com/naerymdan/kandev-plugin-forgejo"
 icon: "assets/icon.svg"
 
 # The provider-neutral source-control contracts this plugin builds on landed
-# after v0.87.1 (source commit f218880ec) and first shipped in v0.88.0. That is
-# the floor for an activated provider recipe — not the base template's 0.86.0.
+# after v0.87.1 (source commit f218880ec) and first shipped in v0.88.0.
 min_kandev_version: "0.88.0"
 
 runtime:
