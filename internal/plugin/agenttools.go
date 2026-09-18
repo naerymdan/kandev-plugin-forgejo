@@ -18,21 +18,20 @@ import (
 // derives the exposed MCP name from them and the plugin id, so the prefix is
 // already long and these stay short.
 const (
-	ToolCI    = "ci"
-	ToolCILog = "ci_log"
-	ToolPR    = "pr"
+	ToolCI = "ci"
+	ToolPR = "pr"
 )
 
-// logTailBytes bounds a single log tail. The host rejects any result above
-// 1 MiB outright rather than truncating it, so this sits far enough below that
-// the surrounding JSON can never push a result over.
-const logTailBytes = 128 << 10
-
-// logTailDefaultLines is the tail length used when the caller does not ask for
-// one, and logTailMaxLines caps what it may ask for.
+// Bounds on the logs ci may inline. The host rejects any result above 1 MiB
+// outright rather than truncating it, so the total budget sits far enough
+// below that the surrounding JSON can never push a result over. The job count
+// is capped too: each log is a separate request, and the whole invocation has
+// 30 seconds.
 const (
-	logTailDefaultLines = 200
-	logTailMaxLines     = 2000
+	ciLogTailBytes  = 128 << 10
+	ciLogTotalBytes = 256 << 10
+	ciLogMaxJobs    = 5
+	ciLogMaxLines   = 2000
 )
 
 // prListPages and prListLimit bound the search for a pull request by head
@@ -66,8 +65,6 @@ func (r *Runtime) InvokeAgentTool(ctx context.Context, request *pluginsdk.AgentT
 	switch request.Name {
 	case ToolCI:
 		return r.toolCI(ctx, request)
-	case ToolCILog:
-		return r.toolCILog(ctx, request)
 	case ToolPR:
 		return r.toolPR(ctx, request)
 	default:
@@ -75,11 +72,22 @@ func (r *Runtime) InvokeAgentTool(ctx context.Context, request *pluginsdk.AgentT
 	}
 }
 
-// toolCI reports the CI result for a ref.
+// toolCI reports the CI result for a ref, optionally with the tail of each
+// failed job's log.
+//
+// The log fetch lives here rather than in a tool of its own because the
+// question an agent actually has is "what failed and why", and two tools
+// answered it in two round trips while costing a permanent slice of every
+// agent's prompt. Logs stay opt-in through `logs`, so the cheap read stays
+// cheap.
 func (r *Runtime) toolCI(ctx context.Context, request *pluginsdk.AgentToolRequest) (*pluginsdk.AgentToolResult, error) {
 	ref := argString(request.Arguments, "ref")
 	if ref == "" {
 		return toolError("ref is required: pass a branch name or commit SHA."), nil
+	}
+	lines := 0
+	if requested, ok := argInt(request.Arguments, "logs"); ok && requested > 0 {
+		lines = int(min64(requested, ciLogMaxLines))
 	}
 	repository, client, failure := r.agentRepository(ctx, request)
 	if failure != nil {
@@ -91,8 +99,9 @@ func (r *Runtime) toolCI(ctx context.Context, request *pluginsdk.AgentToolReques
 		return toolError(safeMessage(err)), nil
 	}
 
+	fullName := repository.OwnerOrProject + "/" + repository.Name
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s %s@%s", status.State, repository.OwnerOrProject+"/"+repository.Name, ref)
+	fmt.Fprintf(&text, "%s %s@%s", status.State, fullName, ref)
 	if status.Source == forgejo.CISourceNone {
 		text.WriteString(" (no CI reported for this ref)")
 	}
@@ -101,9 +110,17 @@ func (r *Runtime) toolCI(ctx context.Context, request *pluginsdk.AgentToolReques
 			continue
 		}
 		fmt.Fprintf(&text, "\n  %s %s", job.Status, job.Name)
+		// Only a job with an id has a log to fetch. Printing the id where
+		// there is one is also what tells the agent which entries `logs` can
+		// say anything more about.
 		if job.ID > 0 {
 			fmt.Fprintf(&text, " job=%d", job.ID)
 		}
+	}
+
+	entries := jobsToAny(status.Jobs)
+	if lines > 0 {
+		appendFailedJobLogs(ctx, client, repository, status, lines, &text, entries)
 	}
 
 	return &pluginsdk.AgentToolResult{
@@ -114,54 +131,63 @@ func (r *Runtime) toolCI(ctx context.Context, request *pluginsdk.AgentToolReques
 			"ref":    status.Ref,
 			"sha":    status.SHA,
 			"url":    status.URL,
-			"repo":   repository.OwnerOrProject + "/" + repository.Name,
-			"jobs":   jobsToAny(status.Jobs),
+			"repo":   fullName,
+			"jobs":   entries,
 		},
 	}, nil
 }
 
-// toolCILog returns the tail of one job's log.
-func (r *Runtime) toolCILog(ctx context.Context, request *pluginsdk.AgentToolRequest) (*pluginsdk.AgentToolResult, error) {
-	jobID, ok := argInt(request.Arguments, "job")
-	if !ok || jobID <= 0 {
-		return toolError("job is required: pass the job id reported by the ci tool."), nil
-	}
-	lines := logTailDefaultLines
-	if requested, ok := argInt(request.Arguments, "lines"); ok && requested > 0 {
-		lines = int(min64(requested, logTailMaxLines))
-	}
-	repository, client, failure := r.agentRepository(ctx, request)
-	if failure != nil {
-		return failure, nil
-	}
-
-	log, truncated, err := client.JobLogTail(ctx, repository.OwnerOrProject, repository.Name, jobID, logTailBytes)
-	if err != nil {
-		if errors.Is(err, forgejo.ErrNotFound) {
-			// Forgejo 13 and earlier serve workflow runs but no job logs, so
-			// "not found" here is as likely to be the release as the job.
-			return toolError(fmt.Sprintf("No log for job %d. The job may have expired, or this instance does not serve job logs.", jobID)), nil
+// appendFailedJobLogs inlines the tail of each failed job's log, bounded by a
+// shared byte budget and a job count so one pathological run cannot blow the
+// result size or the invocation timeout.
+//
+// The log text goes only into text, never into the structured content: the
+// host counts Text plus the encoded structured content against one 1 MiB
+// ceiling, so carrying the same bytes twice would halve the budget for no
+// gain. The structured entries record that a log was attached and whether it
+// was cut.
+func appendFailedJobLogs(ctx context.Context, client *forgejo.Client, repository sourcecontrol.Repository,
+	status forgejo.CIStatus, lines int, text *strings.Builder, entries []any) {
+	budget := ciLogTotalBytes
+	fetched := 0
+	for i, job := range status.Jobs {
+		if job.Status != forgejo.CIStateFailure || job.ID <= 0 {
+			continue
 		}
-		return toolError(safeMessage(err)), nil
-	}
+		if fetched >= ciLogMaxJobs || budget <= 0 {
+			fmt.Fprintf(text, "\n\n(more failed jobs have logs; ask again for one of them)")
+			return
+		}
 
-	tail, dropped := lastLines(log, lines)
-	truncated = truncated || dropped
-	if strings.TrimSpace(tail) == "" {
-		tail = "(the job log is empty)"
+		size := ciLogTailBytes
+		if size > budget {
+			size = budget
+		}
+		fmt.Fprintf(text, "\n\n--- %s (job %d) ---", job.Name, job.ID)
+		log, truncated, err := client.JobLogTail(ctx, repository.OwnerOrProject, repository.Name, job.ID, size)
+		if err != nil {
+			// A release that lists jobs but serves no logs, an expired log and
+			// an unknown id are indistinguishable here and mean the same thing
+			// to the caller: there is nothing to read.
+			text.WriteString("\n(no log available)")
+			continue
+		}
+		tail, dropped := lastLines(log, lines)
+		if strings.TrimSpace(tail) == "" {
+			text.WriteString("\n(the job log is empty)")
+			continue
+		}
+		if truncated || dropped {
+			text.WriteString("\n(earlier output omitted)")
+		}
+		text.WriteString("\n" + tail)
+		budget -= len(tail)
+		fetched++
+		if entry, ok := entries[i].(map[string]any); ok {
+			entry["log_attached"] = true
+			entry["log_truncated"] = truncated || dropped
+		}
 	}
-	text := tail
-	if truncated {
-		text = "(earlier output omitted)\n" + tail
-	}
-	return &pluginsdk.AgentToolResult{
-		Text: text,
-		StructuredContent: map[string]any{
-			"job":       jobID,
-			"truncated": truncated,
-			"bytes":     len(tail),
-		},
-	}, nil
 }
 
 // toolPR reads, opens, or readies the pull request for a task.

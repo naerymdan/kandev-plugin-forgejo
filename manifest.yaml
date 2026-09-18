@@ -81,7 +81,7 @@ actions:
 # they cost less than the prose they replace.
 agent_tools:
   - name: "ci"
-    description: "Forgejo/Gitea CI for a ref in this task's repo: overall state, plus each job with an id for ci_log."
+    description: "Forgejo/Gitea CI for a ref in this task's repo: overall state and each job, optionally with the tail of each failed job's log."
     surfaces: ["kanban-task"]
     input_schema:
       type: object
@@ -89,30 +89,13 @@ agent_tools:
         ref:
           type: string
           description: "Branch name or commit SHA."
+        logs:
+          type: integer
+          description: "Tail lines per failed job. Omit for none, max 2000."
         repo:
           type: string
           description: "owner/name; only if the task has several."
       required: ["ref"]
-    annotations:
-      read_only_hint: true
-      idempotent_hint: true
-      open_world_hint: true
-
-  - name: "ci_log"
-    description: "Tail of a Forgejo/Gitea CI job log, by the job id ci reports."
-    surfaces: ["kanban-task"]
-    input_schema:
-      type: object
-      properties:
-        job:
-          type: integer
-          description: "Job id from ci."
-        lines:
-          type: integer
-          description: "Tail length. Default 200, max 2000."
-        repo:
-          type: string
-      required: ["job"]
     annotations:
       read_only_hint: true
       idempotent_hint: true

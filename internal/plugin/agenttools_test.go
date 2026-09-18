@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,9 +189,13 @@ func TestAgentToolCIRequiresRef(t *testing.T) {
 	require.Contains(t, result.Text, "ref is required")
 }
 
-func TestAgentToolCILogReturnsTailAndMarksTruncation(t *testing.T) {
+func TestAgentToolCIInlinesFailedJobLogs(t *testing.T) {
 	t.Parallel()
 	fixture := newAgentFixture(t)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs",
+		`{"total_count":1,"workflow_runs":[{"id":7,"status":"failure","title":"build","commit_sha":"abc1234"}]}`)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs/7/jobs",
+		`[{"id":41,"name":"lint","status":"success"},{"id":42,"name":"test","status":"failure"}]`)
 	var builder strings.Builder
 	for i := 0; i < 500; i++ {
 		builder.WriteString("log line\n")
@@ -200,24 +205,79 @@ func TestAgentToolCILogReturnsTailAndMarksTruncation(t *testing.T) {
 		_, _ = w.Write([]byte(builder.String()))
 	})
 
-	result := fixture.invoke(t, ToolCILog, map[string]any{"job": float64(42), "lines": float64(5)})
+	// Without logs the cheap read stays cheap and fetches nothing.
+	summary := fixture.invoke(t, ToolCI, map[string]any{"ref": "feature"})
+	require.False(t, summary.IsError)
+	require.NotContains(t, summary.Text, "FINAL FAILURE")
+	require.Zero(t, fixture.callCount("GET", "/api/v1/repos/kandev/demo/actions/jobs/42/logs"))
+
+	result := fixture.invoke(t, ToolCI, map[string]any{"ref": "feature", "logs": float64(5)})
 	require.False(t, result.IsError)
+	require.Contains(t, result.Text, "--- test (job 42) ---")
 	require.Contains(t, result.Text, "FINAL FAILURE")
 	require.Contains(t, result.Text, "earlier output omitted")
-	require.Equal(t, true, result.StructuredContent["truncated"])
-	require.Equal(t, 5, strings.Count(strings.TrimSuffix(result.Text, "\n"), "\n"),
-		"one header line plus the five requested lines")
+	require.NotContains(t, result.Text, "--- lint", "a passing job has nothing to explain")
+
+	jobs := result.StructuredContent["jobs"].([]any)
+	failed := jobs[1].(map[string]any)
+	require.Equal(t, true, failed["log_attached"])
+	require.Equal(t, true, failed["log_truncated"])
+	// The log body belongs to Text alone: the host counts Text and the encoded
+	// structured content against one ceiling.
+	require.NotContains(t, failed, "log")
 }
 
-// TestAgentToolCILogMissingEndpointExplainsItself covers Forgejo 13, where the
-// endpoint does not exist. A bare "not found" would send the agent looking for
-// a job that is really there.
-func TestAgentToolCILogMissingEndpointExplainsItself(t *testing.T) {
+// TestAgentToolCILogsBoundedByJobCount keeps one pathological run from
+// spending the whole invocation on log fetches.
+func TestAgentToolCILogsBoundedByJobCount(t *testing.T) {
 	t.Parallel()
 	fixture := newAgentFixture(t)
-	result := fixture.invoke(t, ToolCILog, map[string]any{"job": float64(42)})
-	require.True(t, result.IsError)
-	require.Contains(t, result.Text, "does not serve job logs")
+	jobs := make([]string, 0, 8)
+	for id := 41; id <= 48; id++ {
+		jobs = append(jobs, fmt.Sprintf(`{"id":%d,"name":"job-%d","status":"failure"}`, id, id))
+		fixture.json("GET", fmt.Sprintf("/api/v1/repos/kandev/demo/actions/jobs/%d/logs", id), "boom\n")
+	}
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs",
+		`{"total_count":1,"workflow_runs":[{"id":7,"status":"failure","title":"build","commit_sha":"abc"}]}`)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs/7/jobs", "["+strings.Join(jobs, ",")+"]")
+
+	result := fixture.invoke(t, ToolCI, map[string]any{"ref": "feature", "logs": float64(50)})
+	require.False(t, result.IsError)
+	require.Equal(t, ciLogMaxJobs, strings.Count(result.Text, "--- job-"))
+	require.Contains(t, result.Text, "more failed jobs have logs")
+}
+
+// TestAgentToolCILogUnavailableIsLocalToTheJob covers Forgejo 13, which lists
+// runs but serves no job logs, and Gitea's 500 for an unknown id. Neither may
+// turn the whole CI read into a failure.
+func TestAgentToolCILogUnavailableIsLocalToTheJob(t *testing.T) {
+	t.Parallel()
+	fixture := newAgentFixture(t)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs",
+		`{"total_count":1,"workflow_runs":[{"id":7,"status":"failure","title":"build","commit_sha":"abc"}]}`)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/actions/runs/7/jobs",
+		`[{"id":42,"name":"test","status":"failure"}]`)
+	// No log route registered: the fake instance answers 404.
+
+	result := fixture.invoke(t, ToolCI, map[string]any{"ref": "feature", "logs": float64(20)})
+	require.False(t, result.IsError, "a missing log is not a failed CI read")
+	require.Contains(t, result.Text, "failure test job=42")
+	require.Contains(t, result.Text, "(no log available)")
+}
+
+// TestAgentToolCIWithoutLogIDsAsksForNothing covers the commit-status source,
+// where checks are real but have no fetchable log.
+func TestAgentToolCIWithoutLogIDsAsksForNothing(t *testing.T) {
+	t.Parallel()
+	fixture := newAgentFixture(t)
+	fixture.json("GET", "/api/v1/repos/kandev/demo/commits/feature/status",
+		`{"state":"failure","sha":"dead","statuses":[{"status":"failure","context":"woodpecker/test","target_url":"http://ci/2"}]}`)
+
+	result := fixture.invoke(t, ToolCI, map[string]any{"ref": "feature", "logs": float64(20)})
+	require.False(t, result.IsError)
+	require.Contains(t, result.Text, "failure woodpecker/test")
+	require.NotContains(t, result.Text, "job=")
+	require.NotContains(t, result.Text, "---")
 }
 
 func TestAgentToolPROpenIsIdempotent(t *testing.T) {
@@ -321,8 +381,8 @@ func TestAgentToolsRespectTheWorkspaceToggle(t *testing.T) {
 	require.NoError(t, fixture.host.SetState(context.Background(), "workspace", "workspace-1",
 		enabledStateKey, map[string]any{"enabled": false}))
 
-	for _, name := range []string{ToolCI, ToolCILog, ToolPR} {
-		result := fixture.invoke(t, name, map[string]any{"ref": "feature", "job": float64(1), "op": "get"})
+	for _, name := range []string{ToolCI, ToolPR} {
+		result := fixture.invoke(t, name, map[string]any{"ref": "feature", "op": "get"})
 		require.Truef(t, result.IsError, "tool %s", name)
 		require.Contains(t, result.Text, "turned off")
 	}

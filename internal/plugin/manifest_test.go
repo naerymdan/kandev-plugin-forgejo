@@ -137,7 +137,7 @@ func TestManifestPinsContractFloor(t *testing.T) {
 func TestManifestAgentToolsStayWithinBudget(t *testing.T) {
 	t.Parallel()
 	parsed := loadManifest(t)
-	require.Len(t, parsed.AgentTools, 3, "a new agent tool is a permanent context cost; weigh it deliberately")
+	require.Len(t, parsed.AgentTools, 2, "a new agent tool is a permanent context cost; weigh it deliberately")
 
 	total := 0
 	seen := map[string]struct{}{}
@@ -171,9 +171,9 @@ func TestManifestAgentToolsStayWithinBudget(t *testing.T) {
 		total += len(encoded)
 	}
 	// Measured with kandev's own estimator (o200k_base:mcp-tool-json-v1), the
-	// three tools cost 419 tokens together. This byte ceiling is the proxy
-	// this repo can enforce without importing kandev-internal packages.
-	require.Less(t, total, 2048, "agent_tools definitions total %d bytes", total)
+	// two tools cost 329 tokens together. This byte ceiling is the proxy this
+	// repo can enforce without importing kandev-internal packages.
+	require.Less(t, total, 1536, "agent_tools definitions total %d bytes", total)
 }
 
 // Least privilege: the plugin must not claim capabilities it never exercises.
