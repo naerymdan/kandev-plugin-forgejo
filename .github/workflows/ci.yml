@@ -72,17 +72,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Oldest supported Forgejo, current Forgejo, and current Gitea. The
-          # spread is the point: it is what backs the compatibility claim.
+          # The declared floor and the current release of each host. The floor
+          # entries are the ones that matter: they are what the README's
+          # supported range promises, so a regression there is a broken promise.
+          - flavor: gitea
+            binary: gitea
+            image: gitea/gitea:1.20
+          - flavor: gitea
+            binary: gitea
+            image: gitea/gitea:1.27
           - flavor: forgejo
             binary: forgejo
-            image: codeberg.org/forgejo/forgejo:13
+            image: codeberg.org/forgejo/forgejo:7
           - flavor: forgejo
             binary: forgejo
             image: codeberg.org/forgejo/forgejo:16
-          - flavor: gitea
-            binary: gitea
-            image: gitea/gitea:1.24
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,12 +127,12 @@ jobs:
           docker exec -u git -e ADMIN_PASSWORD="$ADMIN_PASSWORD" instance "$BINARY" admin user create \
             --admin --username kandev --password "$ADMIN_PASSWORD" \
             --email kandev@example.com --must-change-password=false
-          # Mint the API token through the admin CLI rather than HTTP basic
-          # auth, so no credential pair ever appears in a command line.
+          # Mint through the admin CLI rather than HTTP basic auth: no
+          # credential pair ever appears in a command line, and the CLI's
+          # 'all' scope is the one spelling that works across every supported
+          # version (the 1.20+ scope names do not exist on older hosts).
           token="$(docker exec -u git instance "$BINARY" admin user generate-access-token \
-            --username kandev --token-name ci \
-            --scopes 'write:repository,write:issue,write:user,read:organization' \
-            --raw | tr -d '\r\n')"
+            --username kandev --token-name ci --scopes 'all' --raw | tr -d '\r\n')"
           echo "::add-mask::$token"
           auth="Authorization: token $token"
           curl -sf -X POST -H "$auth" -H 'Content-Type: application/json' \

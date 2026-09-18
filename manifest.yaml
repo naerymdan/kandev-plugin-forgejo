@@ -93,5 +93,5 @@ config_schema:
     api_token:
       type: string
       title: "Access token"
-      description: "Personal access token with read:repository (and write:repository to open pull requests). Stored in Kandev's encrypted vault and readable only inside this plugin process."
+      description: "Personal access token with scopes read:repository, read:user and read:issue, plus write:repository to open pull requests. Stored in Kandev's encrypted vault and readable only inside this plugin process."
       secret: true
