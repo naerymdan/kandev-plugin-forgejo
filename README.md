@@ -45,10 +45,22 @@ Changing the configuration restarts the plugin; that is expected.
 
 ## Forgejo and Gitea
 
-Forgejo is a hard fork of Gitea and both serve the same versioned REST surface
-at `/api/v1`. This plugin deliberately restricts itself to endpoints and fields
-that exist on both, so one plugin serves either host. The connection panel
-labels which flavor it detected, but no behavior branches on it.
+Forgejo is a hard fork of Gitea. Forgejo has diverged substantially in its web
+UI and features, but it still serves the Gitea-compatible REST surface at
+`/api/v1` and continues to declare its compatibility level in the version
+string (`16.0.5+gitea-1.22.0`). This plugin deliberately restricts itself to
+endpoints and fields that exist on both, so one plugin serves either host.
+
+Every request/response shape this plugin depends on was compared field by field
+across Forgejo 13.0.5, Forgejo 16.0.5, and Gitea 1.24.7. They are identical;
+the only difference is the version string itself.
+
+The connection panel labels which flavor it detected, but **no behavior
+branches on it**. Detection asks for Forgejo's own `/api/forgejo/v1/version`
+namespace, which Gitea does not serve, rather than matching on the
+`+gitea-<compat>` suffix — that suffix is a compatibility declaration Forgejo
+could stop publishing as it diverges further, and the namespace probe keeps
+working if it does.
 
 Two places where the shared surface differs from what a GitHub-shaped client
 would assume, and which this plugin handles explicitly:
@@ -64,10 +76,15 @@ would assume, and which this plugin handles explicitly:
 The live contract tests in `internal/forgejo/integration_test.go` were run
 against both, with identical results:
 
-| Host | Version |
-| --- | --- |
-| Forgejo | 13.0.5+gitea-1.22.0 |
-| Gitea | 1.24.7 |
+| Host | Version | Why this one |
+| --- | --- | --- |
+| Forgejo | 13.0.5+gitea-1.22.0 | Oldest release the plugin is tested against |
+| Forgejo | 16.0.5+gitea-1.22.0 | Current Forgejo |
+| Gitea | 1.24.7 | Current Gitea |
+
+CI runs the same suite against all three on every change, and asserts the
+detected flavor matches the host under test. If Forgejo's shared surface ever
+diverges, that matrix is what fails first.
 
 ## Identity and security notes
 
@@ -133,7 +150,10 @@ KANDEV_FORGEJO_HEAD_BRANCH=feature/kandev-create \
 go test ./internal/forgejo -run TestLive -v
 ```
 
-Run the same command against a Gitea container before releasing.
+`KANDEV_FORGEJO_EXPECT_FLAVOR=forgejo|gitea` additionally asserts flavor
+detection. The create test branches off a fresh head each run, so it is safe to
+re-run against a long-lived instance. Run the suite against Forgejo and Gitea
+containers before releasing; CI does this for all three supported versions.
 
 ## Layout
 

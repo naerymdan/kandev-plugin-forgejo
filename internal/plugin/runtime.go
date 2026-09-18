@@ -131,19 +131,9 @@ func (r *Runtime) connectionStatus(ctx context.Context, probe bool) (*pluginsdk.
 	status["account"] = user.Login
 	if version, err := client.Version(ctx); err == nil && strings.TrimSpace(version) != "" {
 		status["instance_version"] = version
-		// Forgejo reports "<version>+gitea-<compat>"; Gitea reports its own.
-		status["flavor"] = flavorFromVersion(version)
+		status["flavor"] = string(client.DetectFlavor(ctx, version))
 	}
 	return jsonResponse(status)
-}
-
-// flavorFromVersion labels the instance for display only. Behavior never
-// branches on it — this plugin targets the shared REST v1 surface.
-func flavorFromVersion(version string) string {
-	if strings.Contains(strings.ToLower(version), "gitea-") {
-		return "forgejo"
-	}
-	return "gitea"
 }
 
 // safeMessage maps an adapter error onto an operator-facing message. Provider

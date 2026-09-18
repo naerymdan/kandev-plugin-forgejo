@@ -72,9 +72,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Oldest supported Forgejo, current Forgejo, and current Gitea. The
+          # spread is the point: it is what backs the compatibility claim.
           - flavor: forgejo
+            binary: forgejo
             image: codeberg.org/forgejo/forgejo:13
+          - flavor: forgejo
+            binary: forgejo
+            image: codeberg.org/forgejo/forgejo:16
           - flavor: gitea
+            binary: gitea
             image: gitea/gitea:1.24
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +96,7 @@ jobs:
           go-version: "1.26"
           cache-dependency-path: kandev-plugin-forgejo/go.sum
 
-      - name: Start ${{ matrix.flavor }}
+      - name: Start ${{ matrix.image }}
         env:
           IMAGE: ${{ matrix.image }}
           PREFIX: ${{ matrix.flavor == 'forgejo' && 'FORGEJO' || 'GITEA' }}
@@ -109,7 +116,7 @@ jobs:
       - name: Seed instance
         id: seed
         env:
-          BINARY: ${{ matrix.flavor }}
+          BINARY: ${{ matrix.binary }}
           ADMIN_PASSWORD: ${{ github.run_id }}-seed-Aa1!
         run: |
           set -euo pipefail
@@ -147,4 +154,5 @@ jobs:
           KANDEV_FORGEJO_OWNER: kandev
           KANDEV_FORGEJO_REPO: demo
           KANDEV_FORGEJO_HEAD_BRANCH: feature/kandev-create
+          KANDEV_FORGEJO_EXPECT_FLAVOR: ${{ matrix.flavor }}
         run: go test ./internal/forgejo -run TestLive -v -count=1

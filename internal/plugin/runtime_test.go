@@ -69,11 +69,12 @@ func TestConnectionGetReportsUnconfigured(t *testing.T) {
 func TestConnectionTestReportsFlavorAndNeverLeaksToken(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
-		name       string
-		version    string
-		wantFlavor string
+		name             string
+		version          string
+		forgejoNamespace bool
+		wantFlavor       string
 	}{
-		{name: "forgejo", version: "13.0.5+gitea-1.22.0", wantFlavor: "forgejo"},
+		{name: "forgejo", version: "16.0.5+gitea-1.22.0", forgejoNamespace: true, wantFlavor: "forgejo"},
 		{name: "gitea", version: "1.24.7", wantFlavor: "gitea"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -84,6 +85,13 @@ func TestConnectionTestReportsFlavorAndNeverLeaksToken(t *testing.T) {
 				case "/api/v1/user":
 					_, _ = w.Write([]byte(`{"login":"kandev"}`))
 				case "/api/v1/version":
+					_ = json.NewEncoder(w).Encode(map[string]any{"version": testCase.version})
+				case "/api/forgejo/v1/version":
+					// Only Forgejo serves its own namespace.
+					if !testCase.forgejoNamespace {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"version": testCase.version})
 				default:
 					w.WriteHeader(http.StatusNotFound)

@@ -3,6 +3,7 @@ package forgejo
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -150,6 +151,39 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return payload.Version, nil
+}
+
+// Flavor names the software serving this instance, for display only. No
+// behavior branches on it: the plugin targets the REST v1 surface both hosts
+// share.
+type Flavor string
+
+const (
+	// FlavorForgejo is a Forgejo instance.
+	FlavorForgejo Flavor = "forgejo"
+	// FlavorGitea is a Gitea instance.
+	FlavorGitea Flavor = "gitea"
+)
+
+// DetectFlavor distinguishes Forgejo from Gitea by asking for Forgejo's own
+// API namespace, which Gitea does not serve.
+//
+// The version string is not a reliable discriminator on its own: Forgejo
+// reports "<version>+gitea-<compat>", but that suffix is a compatibility
+// declaration Forgejo may stop publishing as it diverges. The namespace probe
+// keeps working either way; the suffix is only a fallback for a deployment
+// that proxies away the Forgejo namespace.
+func (c *Client) DetectFlavor(ctx context.Context, version string) Flavor {
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := c.do(ctx, http.MethodGet, apiForgejoV1, "/version", nil, nil, &payload); err == nil {
+		return FlavorForgejo
+	}
+	if strings.Contains(strings.ToLower(version), "+gitea-") {
+		return FlavorForgejo
+	}
+	return FlavorGitea
 }
 
 // SearchRepos returns one page of repositories the token can see. page is

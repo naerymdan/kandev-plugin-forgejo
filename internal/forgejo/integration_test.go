@@ -2,9 +2,12 @@ package forgejo
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"kandev-plugin-forgejo/internal/sourcecontrol"
 
@@ -61,6 +64,14 @@ func TestLiveInstanceSpeaksRESTv1(t *testing.T) {
 	user, err := client.CurrentUser(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, user.Login)
+
+	flavor := client.DetectFlavor(ctx, version)
+	require.Contains(t, []Flavor{FlavorForgejo, FlavorGitea}, flavor)
+	t.Logf("detected flavor: %s", flavor)
+	// When the caller says which host this is, hold the probe to it.
+	if expected := strings.TrimSpace(os.Getenv("KANDEV_FORGEJO_EXPECT_FLAVOR")); expected != "" {
+		require.Equal(t, Flavor(expected), flavor)
+	}
 }
 
 func TestLiveRepositoryDiscovery(t *testing.T) {
@@ -193,8 +204,8 @@ func TestLiveReferenceResolutionAndAuthorization(t *testing.T) {
 }
 
 func TestLiveCreatePullRequest(t *testing.T) {
-	branch := strings.TrimSpace(os.Getenv("KANDEV_FORGEJO_HEAD_BRANCH"))
-	if branch == "" {
+	baseBranch := strings.TrimSpace(os.Getenv("KANDEV_FORGEJO_HEAD_BRANCH"))
+	if baseBranch == "" {
 		t.Skip("set KANDEV_FORGEJO_HEAD_BRANCH to exercise pull-request creation")
 	}
 	client, repositories, _, _, _, host := liveAdapters(t)
@@ -204,6 +215,12 @@ func TestLiveCreatePullRequest(t *testing.T) {
 	inspected, err := repositories.Inspect(ctx, "workspace-1", client.Scope()+"/"+owner+"/"+repo)
 	require.NoError(t, err)
 	require.NotNil(t, inspected)
+
+	// Both hosts reject a second open pull request for the same head/base
+	// pair with 409, so branch off a fresh head to keep this test re-runnable
+	// against a long-lived instance.
+	branch := fmt.Sprintf("%s-%d", baseBranch, time.Now().UnixNano())
+	require.NoError(t, createBranch(ctx, client, owner, repo, branch, baseBranch))
 
 	connection := NewConnection(func() pluginsdk.Host { return host })
 	created, err := NewChangeRequests(connection, repositories).Create(ctx, *inspected, branch,
@@ -221,4 +238,12 @@ func TestLiveCreatePullRequest(t *testing.T) {
 	pull, err := client.PullRequest(ctx, owner, repo, created.Identity.Number)
 	require.NoError(t, err)
 	require.Equal(t, "draft", pullRequestState(pull))
+}
+
+// createBranch is test support: the plugin never creates branches at runtime,
+// Kandev's executor does.
+func createBranch(ctx context.Context, client *Client, owner, repo, newBranch, fromBranch string) error {
+	body := map[string]string{"new_branch_name": newBranch, "old_branch_name": fromBranch}
+	path := "/repos/" + pathSegment(owner) + "/" + pathSegment(repo) + "/branches"
+	return client.do(ctx, http.MethodPost, apiV1, path, nil, body, nil)
 }

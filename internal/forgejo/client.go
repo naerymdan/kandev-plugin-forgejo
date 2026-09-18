@@ -91,18 +91,25 @@ func (c *Client) Scope() string { return c.baseURL.String() }
 // Host is the instance hostname, used as the repository provider host.
 func (c *Client) Host() string { return c.baseURL.Host }
 
+// apiV1 is the versioned REST surface Forgejo and Gitea share.
+const apiV1 = "/api/v1"
+
+// apiForgejoV1 is Forgejo's own API namespace. Gitea does not serve it, which
+// makes it a reliable flavor probe.
+const apiForgejoV1 = "/api/forgejo/v1"
+
 // get issues an authenticated GET against /api/v1<path> and decodes JSON into
 // out. query may be nil.
 func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
-	return c.do(ctx, http.MethodGet, path, query, nil, out)
+	return c.do(ctx, http.MethodGet, apiV1, path, query, nil, out)
 }
 
 // post issues an authenticated POST against /api/v1<path>.
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
-	return c.do(ctx, http.MethodPost, path, nil, body, out)
+	return c.do(ctx, http.MethodPost, apiV1, path, nil, body, out)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+func (c *Client) do(ctx context.Context, method, prefix, path string, query url.Values, body, out any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -111,7 +118,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	// form must go in RawPath and the decoded form in Path — otherwise a
 	// repository named "a/b" is requested as "a%252Fb".
 	endpoint := *c.baseURL
-	escapedPath := strings.TrimSuffix(endpoint.EscapedPath(), "/") + "/api/v1" + path
+	escapedPath := strings.TrimSuffix(endpoint.EscapedPath(), "/") + prefix + path
 	decodedPath, err := url.PathUnescape(escapedPath)
 	if err != nil {
 		return fmt.Errorf("forgejo: build request path: %w", err)

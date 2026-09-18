@@ -14,4 +14,7 @@ Initial release.
   and unresolved review comments, plus a workspace-level association map.
 - Composer `#` pull-request references with fail-closed submit-time
   authorization.
-- Verified against Forgejo 13.0.5 and Gitea 1.24.7.
+- Flavor detection probes Forgejo's `/api/forgejo/v1` namespace rather than
+  matching the `+gitea-` version suffix, so it survives further divergence.
+- Verified against Forgejo 13.0.5, Forgejo 16.0.5, and Gitea 1.24.7, with
+  identical results on all three.

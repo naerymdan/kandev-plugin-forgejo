@@ -112,3 +112,47 @@ func TestClientEscapesPathSegments(t *testing.T) {
 	require.Contains(t, api.requests[0].RequestURI, "weird%2Fname",
 		"a slash in a repository name must stay escaped, not split into a new path segment")
 }
+
+// Flavor is display-only, but it must survive Forgejo dropping the
+// "+gitea-<compat>" suffix it currently publishes.
+func TestDetectFlavor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("forgejo namespace present", func(t *testing.T) {
+		t.Parallel()
+		api := newAPIServer(t)
+		api.handle(http.MethodGet, "/api/forgejo/v1/version", http.StatusOK, map[string]any{"version": "16.0.5+gitea-1.22.0"})
+		client, err := NewClient(api.url(), "token", nil)
+		require.NoError(t, err)
+		require.Equal(t, FlavorForgejo, client.DetectFlavor(context.Background(), "16.0.5+gitea-1.22.0"))
+	})
+
+	t.Run("forgejo that no longer advertises gitea compatibility", func(t *testing.T) {
+		t.Parallel()
+		api := newAPIServer(t)
+		api.handle(http.MethodGet, "/api/forgejo/v1/version", http.StatusOK, map[string]any{"version": "20.0.0"})
+		client, err := NewClient(api.url(), "token", nil)
+		require.NoError(t, err)
+		require.Equal(t, FlavorForgejo, client.DetectFlavor(context.Background(), "20.0.0"),
+			"the namespace probe must not depend on the version suffix")
+	})
+
+	t.Run("gitea does not serve the forgejo namespace", func(t *testing.T) {
+		t.Parallel()
+		api := newAPIServer(t)
+		// /api/forgejo/v1/version intentionally unregistered -> 404.
+		client, err := NewClient(api.url(), "token", nil)
+		require.NoError(t, err)
+		require.Equal(t, FlavorGitea, client.DetectFlavor(context.Background(), "1.24.7"))
+	})
+
+	t.Run("falls back to the version suffix when the namespace is unreachable", func(t *testing.T) {
+		t.Parallel()
+		api := newAPIServer(t)
+		api.handle(http.MethodGet, "/api/forgejo/v1/version", http.StatusBadGateway, nil)
+		client, err := NewClient(api.url(), "token", nil)
+		require.NoError(t, err)
+		require.Equal(t, FlavorForgejo, client.DetectFlavor(context.Background(), "16.0.5+gitea-1.22.0"))
+		require.Equal(t, FlavorGitea, client.DetectFlavor(context.Background(), "1.24.7"))
+	})
+}
