@@ -97,7 +97,7 @@ func (c *ChangeRequests) Create(ctx context.Context, repository sourcecontrol.Re
 	// in REST v1. The portable convention both UIs recognize is a "WIP:"
 	// title prefix, so honor the caller's draft request that way rather than
 	// silently dropping it.
-	if input.Draft && !isWorkInProgressTitle(title) {
+	if input.Draft && !IsWorkInProgressTitle(title) {
 		title = "WIP: " + title
 	}
 
@@ -130,16 +130,40 @@ func (c *ChangeRequests) Create(ctx context.Context, repository sourcecontrol.Re
 	}, nil
 }
 
-// isWorkInProgressTitle reports whether a title already carries one of the
+// workInProgressPrefixes are the title markers Forgejo and Gitea both treat as
+// a draft. REST v1 has no draft flag on either host, so the prefix is the
+// portable representation.
+var workInProgressPrefixes = []string{"WIP:", "[WIP]", "DRAFT:", "[DRAFT]"}
+
+// IsWorkInProgressTitle reports whether a title already carries one of the
 // work-in-progress prefixes Forgejo and Gitea treat as a draft marker.
-func isWorkInProgressTitle(title string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(title))
-	for _, prefix := range []string{"WIP:", "[WIP]", "DRAFT:", "[DRAFT]"} {
+func IsWorkInProgressTitle(title string) bool {
+	_, found := workInProgressPrefix(title)
+	return found
+}
+
+// StripWorkInProgressPrefix removes a leading draft marker and reports whether
+// one was there. It is the "mark ready for review" operation on a host with no
+// draft flag.
+func StripWorkInProgressPrefix(title string) (string, bool) {
+	prefix, found := workInProgressPrefix(title)
+	if !found {
+		return strings.TrimSpace(title), false
+	}
+	return strings.TrimSpace(strings.TrimSpace(title)[len(prefix):]), true
+}
+
+// workInProgressPrefix returns the marker a title starts with, as it appears
+// in the title rather than upper-cased, so it can be sliced off exactly.
+func workInProgressPrefix(title string) (string, bool) {
+	trimmed := strings.TrimSpace(title)
+	upper := strings.ToUpper(trimmed)
+	for _, prefix := range workInProgressPrefixes {
 		if strings.HasPrefix(upper, prefix) {
-			return true
+			return trimmed[:len(prefix)], true
 		}
 	}
-	return false
+	return "", false
 }
 
 // ParsePullRequestReference accepts a full pull-request URL on the configured

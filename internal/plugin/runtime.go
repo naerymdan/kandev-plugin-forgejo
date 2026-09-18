@@ -46,6 +46,12 @@ type Runtime struct {
 	pluginsdk.UnimplementedPlugin
 	extension  *sourcecontrol.Extension
 	connection *forgejo.Connection
+	// The adapters below are also reachable through extension, but the agent
+	// tools call them directly: an agent tool has a task, not the
+	// VerifiedActionContext the recipe's action path is built around.
+	repositories   *forgejo.Repositories
+	changeRequests *forgejo.ChangeRequests
+	associations   *forgejo.Associations
 }
 
 var (
@@ -66,14 +72,19 @@ func NewRuntime() *Runtime {
 	repositories := forgejo.NewRepositories(connection, hosts, ProviderID)
 	associations := forgejo.NewAssociations(hosts)
 
+	changeRequests := forgejo.NewChangeRequests(connection, repositories)
+
 	runtime.connection = connection
+	runtime.repositories = repositories
+	runtime.changeRequests = changeRequests
+	runtime.associations = associations
 	runtime.extension = &sourcecontrol.Extension{
 		ProviderID:           ProviderID,
 		ReferenceSource:      ReferenceSource,
 		Repositories:         repositories,
 		RepositoryDetails:    repositories,
 		AttachedRepositories: repositories,
-		ChangeRequests:       forgejo.NewChangeRequests(connection, repositories),
+		ChangeRequests:       changeRequests,
 		Associations:         associations,
 		Reviews:              forgejo.NewReviews(connection, repositories, associations, ProviderID),
 		References:           forgejo.NewReferences(connection),

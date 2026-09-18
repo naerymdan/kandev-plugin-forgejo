@@ -171,7 +171,7 @@ func pullRequestState(pull PullRequest) string {
 		return "merged"
 	case strings.EqualFold(strings.TrimSpace(pull.State), "closed"):
 		return "closed"
-	case pull.Draft || isWorkInProgressTitle(pull.Title):
+	case pull.Draft || IsWorkInProgressTitle(pull.Title):
 		return "draft"
 	default:
 		return "open"

@@ -4,7 +4,7 @@
 # catalog entry. Keep all four in sync when renaming.
 id: "kandev-plugin-forgejo"
 api_version: 1
-version: "0.1.2"
+version: "0.2.0"
 display_name: "Forgejo"
 description: "Connect a self-hosted Forgejo or Gitea instance to native Kandev repository, pull-request, task-link, and review workflows."
 author: "naerymdan"
@@ -12,9 +12,12 @@ categories: ["connector"]
 repo_url: "https://github.com/naerymdan/kandev-plugin-forgejo"
 icon: "assets/icon.svg"
 
-# The provider-neutral source-control contracts this plugin builds on landed
-# after v0.87.1 (source commit f218880ec) and first shipped in v0.88.0.
-min_kandev_version: "0.88.0"
+# The source-control contracts this plugin started on shipped in v0.88.0, but
+# `agent_tools` below needs a host that serves plugin tools over Kandev's MCP
+# endpoint. An older host ignores the block silently rather than refusing the
+# install, which would leave the tools missing with nothing said — so the floor
+# is raised instead.
+min_kandev_version: "0.95.0"
 
 runtime:
   type: binary
@@ -69,6 +72,82 @@ actions:
   - key: "change_requests.associations"
     scope: "workspace"
     max_body_bytes: 1024
+
+# Tools exposed to task agents through Kandev's MCP endpoint. Every definition
+# here is injected into every agent session on a matching surface and cannot be
+# swapped for a built-in, so the set is deliberately small and the descriptions
+# and schemas are written to be read once, not browsed. They exist to delete
+# hand-written curl recipes from workflow step prompts, which is only a win if
+# they cost less than the prose they replace.
+agent_tools:
+  - name: "ci"
+    description: "Forgejo/Gitea CI for a ref in this task's repo: overall state, plus each job with an id for ci_log."
+    surfaces: ["kanban-task"]
+    input_schema:
+      type: object
+      properties:
+        ref:
+          type: string
+          description: "Branch name or commit SHA."
+        repo:
+          type: string
+          description: "owner/name; only if the task has several."
+      required: ["ref"]
+    annotations:
+      read_only_hint: true
+      idempotent_hint: true
+      open_world_hint: true
+
+  - name: "ci_log"
+    description: "Tail of a Forgejo/Gitea CI job log, by the job id ci reports."
+    surfaces: ["kanban-task"]
+    input_schema:
+      type: object
+      properties:
+        job:
+          type: integer
+          description: "Job id from ci."
+        lines:
+          type: integer
+          description: "Tail length. Default 200, max 2000."
+        repo:
+          type: string
+      required: ["job"]
+    annotations:
+      read_only_hint: true
+      idempotent_hint: true
+      open_world_hint: true
+
+  - name: "pr"
+    description: "This task's Forgejo/Gitea pull request: get, open, or ready (clears the WIP: prefix). open is idempotent."
+    surfaces: ["kanban-task"]
+    input_schema:
+      type: object
+      properties:
+        op:
+          type: string
+          enum: ["get", "open", "ready"]
+        head:
+          type: string
+          description: "Branch with the changes; required for open."
+        base:
+          type: string
+          description: "Target branch; defaults to the repo default."
+        title:
+          type: string
+          description: "Required for open."
+        body:
+          type: string
+        draft:
+          type: boolean
+        repo:
+          type: string
+      required: ["op"]
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+      open_world_hint: true
 
 repository_providers: ["forgejo"]
 

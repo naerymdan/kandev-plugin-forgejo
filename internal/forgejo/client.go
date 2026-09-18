@@ -33,6 +33,20 @@ var ErrNotFound = errors.New("forgejo: resource not found")
 // which on some deployments echoes the presented token.
 var ErrUnauthorized = errors.New("forgejo: not authorized")
 
+// StatusError carries an unexpected HTTP status without the response body,
+// which on some deployments echoes the presented token. Callers that need to
+// tell one failure mode from another read Status; everything else treats it as
+// an opaque transport error.
+type StatusError struct {
+	Method string
+	Path   string
+	Status int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("forgejo: %s %s: unexpected status %d", e.Method, e.Path, e.Status)
+}
+
 // Client is a bounded REST v1 client for one Forgejo or Gitea instance.
 type Client struct {
 	baseURL *url.URL
@@ -109,9 +123,10 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 	return c.do(ctx, http.MethodPost, apiV1, path, nil, body, out)
 }
 
-func (c *Client) do(ctx context.Context, method, prefix, path string, query url.Values, body, out any) error {
+// newRequest builds one authenticated request against <base><prefix><path>.
+func (c *Client) newRequest(ctx context.Context, method, prefix, path string, query url.Values, body any) (*http.Request, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	// `path` arrives already percent-escaped (see pathSegment). url.URL.Path
 	// holds the DECODED path and re-escapes '%' on String(), so the escaped
@@ -121,7 +136,7 @@ func (c *Client) do(ctx context.Context, method, prefix, path string, query url.
 	escapedPath := strings.TrimSuffix(endpoint.EscapedPath(), "/") + prefix + path
 	decodedPath, err := url.PathUnescape(escapedPath)
 	if err != nil {
-		return fmt.Errorf("forgejo: build request path: %w", err)
+		return nil, fmt.Errorf("forgejo: build request path: %w", err)
 	}
 	endpoint.Path = decodedPath
 	endpoint.RawPath = escapedPath
@@ -133,14 +148,14 @@ func (c *Client) do(ctx context.Context, method, prefix, path string, query url.
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("forgejo: encode request body: %w", err)
+			return nil, fmt.Errorf("forgejo: encode request body: %w", err)
 		}
 		payload = bytes.NewReader(encoded)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), payload)
 	if err != nil {
-		return fmt.Errorf("forgejo: build request: %w", err)
+		return nil, fmt.Errorf("forgejo: build request: %w", err)
 	}
 	// Forgejo and Gitea both accept the "token <value>" scheme for personal
 	// access tokens on every REST v1 endpoint.
@@ -149,7 +164,14 @@ func (c *Client) do(ctx context.Context, method, prefix, path string, query url.
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	return request, nil
+}
 
+func (c *Client) do(ctx context.Context, method, prefix, path string, query url.Values, body, out any) error {
+	request, err := c.newRequest(ctx, method, prefix, path, query, body)
+	if err != nil {
+		return err
+	}
 	response, err := c.http.Do(request)
 	if err != nil {
 		// Wrap without the URL's userinfo and without the token header.
@@ -166,7 +188,7 @@ func (c *Client) do(ctx context.Context, method, prefix, path string, query url.
 	case response.StatusCode == http.StatusUnauthorized, response.StatusCode == http.StatusForbidden:
 		return ErrUnauthorized
 	case response.StatusCode >= 400:
-		return fmt.Errorf("forgejo: %s %s: unexpected status %d", method, path, response.StatusCode)
+		return &StatusError{Method: method, Path: path, Status: response.StatusCode}
 	}
 
 	if out == nil {
@@ -177,4 +199,93 @@ func (c *Client) do(ctx context.Context, method, prefix, path string, query url.
 		return fmt.Errorf("forgejo: decode %s response: %w", path, err)
 	}
 	return nil
+}
+
+// patch issues an authenticated PATCH against /api/v1<path>.
+func (c *Client) patch(ctx context.Context, path string, body, out any) error {
+	return c.do(ctx, http.MethodPatch, apiV1, path, nil, body, out)
+}
+
+// getTail issues an authenticated GET against /api/v1<path> and returns at most
+// maxBytes from the END of the response body, plus whether anything was
+// dropped.
+//
+// CI logs are the one response this plugin reads that has no useful bound, and
+// the interesting part of a failing job is always the end. A suffix Range is
+// requested first because it moves the truncation to the server; a host that
+// ignores it still works, because the body is streamed through a tail buffer
+// rather than materialized.
+func (c *Client) getTail(ctx context.Context, path string, query url.Values, maxBytes int) (string, bool, error) {
+	if maxBytes <= 0 {
+		return "", false, errors.New("forgejo: tail size must be positive")
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, apiV1, path, query, nil)
+	if err != nil {
+		return "", false, err
+	}
+	request.Header.Set("Accept", "text/plain")
+	request.Header.Set("Range", fmt.Sprintf("bytes=-%d", maxBytes))
+
+	response, err := c.http.Do(request)
+	if err != nil {
+		return "", false, fmt.Errorf("forgejo: GET %s: %w", path, err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+		_ = response.Body.Close()
+	}()
+
+	switch {
+	case response.StatusCode == http.StatusNotFound, response.StatusCode == http.StatusGone:
+		return "", false, ErrNotFound
+	case response.StatusCode == http.StatusUnauthorized, response.StatusCode == http.StatusForbidden:
+		return "", false, ErrUnauthorized
+	case response.StatusCode >= 400:
+		return "", false, &StatusError{Method: http.MethodGet, Path: path, Status: response.StatusCode}
+	}
+
+	tail, read, err := readTail(io.LimitReader(response.Body, maxResponseBytes), maxBytes)
+	if err != nil {
+		return "", false, fmt.Errorf("forgejo: read %s: %w", path, err)
+	}
+	// A 206 means the server already applied the suffix range, so whatever
+	// arrived is the true tail and "truncated" means the log was longer.
+	truncated := read > int64(len(tail))
+	if response.StatusCode == http.StatusPartialContent {
+		truncated = len(tail) >= maxBytes
+	}
+	return string(tail), truncated, nil
+}
+
+// readTail streams reader and keeps only the last maxBytes, reporting how many
+// bytes went past. It never holds more than maxBytes plus one chunk.
+func readTail(reader io.Reader, maxBytes int) ([]byte, int64, error) {
+	tail := make([]byte, 0, maxBytes)
+	chunk := make([]byte, 32<<10)
+	var total int64
+	for {
+		n, err := reader.Read(chunk)
+		if n > 0 {
+			total += int64(n)
+			tail = appendTail(tail, chunk[:n], maxBytes)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return tail, total, nil
+			}
+			return nil, total, err
+		}
+	}
+}
+
+// appendTail appends next to tail, discarding from the front so the result
+// never exceeds maxBytes.
+func appendTail(tail, next []byte, maxBytes int) []byte {
+	if len(next) >= maxBytes {
+		return append(tail[:0], next[len(next)-maxBytes:]...)
+	}
+	if overflow := len(tail) + len(next) - maxBytes; overflow > 0 {
+		tail = append(tail[:0], tail[overflow:]...)
+	}
+	return append(tail, next...)
 }

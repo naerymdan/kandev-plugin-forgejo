@@ -314,3 +314,40 @@ func (c *Client) SearchPullRequests(ctx context.Context, query string, limit int
 func pathSegment(value string) string {
 	return url.PathEscape(strings.TrimSpace(value))
 }
+
+// ListPullRequests returns one page of pull requests, newest update first.
+// state is "open", "closed", or "all".
+func (c *Client) ListPullRequests(ctx context.Context, owner, name, state string, page, limit int) ([]PullRequest, error) {
+	if page < 1 {
+		page = 1
+	}
+	values := url.Values{}
+	values.Set("state", state)
+	values.Set("sort", "recentupdate")
+	values.Set("page", strconv.Itoa(page))
+	values.Set("limit", strconv.Itoa(limit))
+	var pulls []PullRequest
+	path := "/repos/" + pathSegment(owner) + "/" + pathSegment(name) + "/pulls"
+	if err := c.get(ctx, path, values, &pulls); err != nil {
+		return nil, err
+	}
+	return pulls, nil
+}
+
+// EditPullRequestInput is the subset of the edit body this plugin sends. Every
+// field is omitted when empty so an edit never clears a value it did not set.
+type EditPullRequestInput struct {
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+	State string `json:"state,omitempty"`
+}
+
+// EditPullRequest applies a partial update and returns the updated object.
+func (c *Client) EditPullRequest(ctx context.Context, owner, name string, number int64, input EditPullRequestInput) (PullRequest, error) {
+	var updated PullRequest
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", pathSegment(owner), pathSegment(name), number)
+	if err := c.patch(ctx, path, input, &updated); err != nil {
+		return PullRequest{}, err
+	}
+	return updated, nil
+}

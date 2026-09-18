@@ -247,3 +247,112 @@ func createBranch(ctx context.Context, client *Client, owner, repo, newBranch, f
 	path := "/repos/" + pathSegment(owner) + "/" + pathSegment(repo) + "/branches"
 	return client.do(ctx, http.MethodPost, apiV1, path, nil, body, nil)
 }
+
+// TestLiveCIStatusResolves proves the fallback chain against a real instance.
+// The interesting assertion is not the state — a disposable repo usually has no
+// CI at all — but that whichever surfaces this release serves are reached
+// without error, and that a ref with nothing on it reports "none" rather than
+// failing.
+func TestLiveCIStatusResolves(t *testing.T) {
+	client, _, _, _, _, _ := liveAdapters(t)
+	_, _, owner, repo := liveConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	branches, err := client.Branches(ctx, owner, repo, 1, 1)
+	require.NoError(t, err)
+	require.NotEmpty(t, branches, "the live repository needs at least one branch")
+	ref := branches[0].Name
+
+	status, err := client.CIStatusFor(ctx, owner, repo, ref)
+	require.NoError(t, err)
+	require.Equal(t, ref, status.Ref)
+	require.Contains(t, []string{CISourceRuns, CISourceTasks, CISourceStatus, CISourceNone}, status.Source)
+	require.Contains(t, []string{CIStateSuccess, CIStateFailure, CIStateRunning, CIStatePending, CIStateNone}, status.State)
+	if status.Source == CISourceNone {
+		require.Equal(t, CIStateNone, status.State)
+		require.Empty(t, status.Jobs)
+	}
+	t.Logf("live CI: source=%s state=%s jobs=%d", status.Source, status.State, len(status.Jobs))
+
+	// Resolving by commit id must take the other query path without error.
+	byCommit, err := client.CIStatusFor(ctx, owner, repo, branches[0].Commit.ID)
+	require.NoError(t, err)
+	require.Contains(t, []string{CISourceRuns, CISourceTasks, CISourceStatus, CISourceNone}, byCommit.Source)
+}
+
+// TestLiveActionsSurfaceMatrix records which Actions endpoints this release
+// serves. It asserts nothing about availability — the point is that each probe
+// either answers or reports a clean "absent", never an unhandled error — and it
+// prints the matrix the fallback chain is designed around.
+func TestLiveActionsSurfaceMatrix(t *testing.T) {
+	client, _, _, _, _, _ := liveAdapters(t)
+	_, _, owner, repo := liveConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	version, err := client.Version(ctx)
+	require.NoError(t, err)
+
+	runs, runsErr := client.ActionRuns(ctx, owner, repo, "", 5)
+	if runsErr != nil {
+		require.ErrorIs(t, runsErr, ErrNotFound, "an unsupported endpoint must map to ErrNotFound")
+	}
+	tasks, tasksErr := client.ActionTasks(ctx, owner, repo, 1, 5)
+	if tasksErr != nil {
+		require.ErrorIs(t, tasksErr, ErrNotFound)
+	}
+	_, _, logsErr := client.JobLogTail(ctx, owner, repo, 1, 1024)
+	if logsErr != nil {
+		require.ErrorIs(t, logsErr, ErrNotFound)
+	}
+
+	t.Logf("version=%s runs=%v(%d) tasks=%v(%d) job_logs=%v",
+		version, runsErr == nil, len(runs), tasksErr == nil, len(tasks), logsErr == nil)
+}
+
+// TestLivePullRequestEditRoundTrips covers the "mark ready" path: the title
+// edit REST v1 offers in place of a draft flag neither host has.
+func TestLivePullRequestEditRoundTrips(t *testing.T) {
+	client, _, _, _, _, _ := liveAdapters(t)
+	_, _, owner, repo := liveConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	base := strings.TrimSpace(os.Getenv("KANDEV_FORGEJO_HEAD_BRANCH"))
+	if base == "" {
+		t.Skip("set KANDEV_FORGEJO_HEAD_BRANCH to exercise pull-request editing")
+	}
+	// A fresh head per run: both hosts reject a second open pull request for
+	// the same head/base pair.
+	head := fmt.Sprintf("%s-edit-%d", base, time.Now().UnixNano())
+	require.NoError(t, createBranch(ctx, client, owner, repo, head, base))
+
+	created, err := client.CreatePullRequest(ctx, owner, repo, CreatePullRequestInput{
+		Head: head, Base: base, Title: "WIP: kandev plugin live edit check",
+	})
+	require.NoError(t, err)
+	require.True(t, IsWorkInProgressTitle(created.Title))
+
+	stripped, changed := StripWorkInProgressPrefix(created.Title)
+	require.True(t, changed)
+	updated, err := client.EditPullRequest(ctx, owner, repo, created.Number, EditPullRequestInput{Title: stripped})
+	require.NoError(t, err)
+	require.Equal(t, stripped, strings.TrimSpace(updated.Title))
+	require.False(t, IsWorkInProgressTitle(updated.Title))
+
+	// The listing used to make open idempotent must find it by head branch.
+	pulls, err := client.ListPullRequests(ctx, owner, repo, "open", 1, 50)
+	require.NoError(t, err)
+	found := false
+	for _, pull := range pulls {
+		if pull.Number == created.Number {
+			require.Equal(t, head, pull.Head.Ref)
+			found = true
+		}
+	}
+	require.True(t, found, "a freshly opened pull request must be listed with its head ref")
+
+	_, err = client.EditPullRequest(ctx, owner, repo, created.Number, EditPullRequestInput{State: "closed"})
+	require.NoError(t, err)
+}

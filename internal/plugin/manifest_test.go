@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,6 +29,19 @@ type manifest struct {
 		Scope        string `yaml:"scope"`
 		MaxBodyBytes int    `yaml:"max_body_bytes"`
 	} `yaml:"actions"`
+	AgentTools []struct {
+		Name         string         `yaml:"name"`
+		Description  string         `yaml:"description"`
+		Surfaces     []string       `yaml:"surfaces"`
+		InputSchema  map[string]any `yaml:"input_schema"`
+		OutputSchema map[string]any `yaml:"output_schema"`
+		Annotations  struct {
+			ReadOnlyHint    *bool `yaml:"read_only_hint"`
+			DestructiveHint *bool `yaml:"destructive_hint"`
+			IdempotentHint  *bool `yaml:"idempotent_hint"`
+			OpenWorldHint   *bool `yaml:"open_world_hint"`
+		} `yaml:"annotations"`
+	} `yaml:"agent_tools"`
 	ReferenceSources []struct {
 		Source   string `yaml:"source"`
 		Provider string `yaml:"provider"`
@@ -105,14 +119,61 @@ func TestManifestDeclaresEveryRoutedAction(t *testing.T) {
 	require.Len(t, parsed.Actions, 11, "an undeclared or stale action entry drifted from the routed set")
 }
 
-// The source-control contracts first shipped in v0.88.0. A lower floor would
-// let the plugin install onto a host that cannot serve it.
+// The source-control contracts first shipped in v0.88.0 and agent tools in
+// v0.95.0. A host below the floor ignores an unknown manifest block instead of
+// refusing the install, so a lower floor here would install a plugin whose
+// tools silently never appear.
 func TestManifestPinsContractFloor(t *testing.T) {
 	t.Parallel()
 	parsed := loadManifest(t)
-	require.Equal(t, "0.88.0", parsed.MinKandevVersion)
+	require.Equal(t, "0.95.0", parsed.MinKandevVersion)
 	require.Equal(t, 1, parsed.APIVersion)
 	require.Equal(t, "binary", parsed.Runtime.Type)
+}
+
+// Agent tools are declared once and injected into every matching agent session
+// forever after, so the manifest is the place to hold the line on their cost
+// and on the invariants kandev enforces at install time.
+func TestManifestAgentToolsStayWithinBudget(t *testing.T) {
+	t.Parallel()
+	parsed := loadManifest(t)
+	require.Len(t, parsed.AgentTools, 3, "a new agent tool is a permanent context cost; weigh it deliberately")
+
+	total := 0
+	seen := map[string]struct{}{}
+	for _, tool := range parsed.AgentTools {
+		require.Regexp(t, `^[a-z0-9][a-z0-9_]{0,31}$`, tool.Name)
+		_, duplicate := seen[tool.Name]
+		require.Falsef(t, duplicate, "duplicate agent tool %q", tool.Name)
+		seen[tool.Name] = struct{}{}
+
+		require.Equalf(t, []string{"kanban-task"}, tool.Surfaces, "tool %q", tool.Name)
+		require.NotEmptyf(t, tool.Description, "tool %q", tool.Name)
+		require.NotEmptyf(t, tool.InputSchema, "tool %q", tool.Name)
+		// kandev forces additionalProperties:false when it compiles the
+		// schema, so declaring it here would only cost bytes.
+		require.NotContainsf(t, tool.InputSchema, "additionalProperties", "tool %q", tool.Name)
+		// An output schema is validated but also shipped to every session.
+		// The results here are small and self-describing, so it is not worth
+		// the context.
+		require.Emptyf(t, tool.OutputSchema, "tool %q", tool.Name)
+		require.Falsef(t, tool.Annotations.ReadOnlyHint != nil && tool.Annotations.DestructiveHint != nil &&
+			*tool.Annotations.ReadOnlyHint && *tool.Annotations.DestructiveHint,
+			"tool %q cannot be both read-only and destructive", tool.Name)
+
+		encoded, err := json.Marshal(map[string]any{
+			"name":        "kandev_kandev_plugin_forgejo_" + tool.Name,
+			"description": tool.Description,
+			"inputSchema": tool.InputSchema,
+		})
+		require.NoError(t, err)
+		require.Lessf(t, len(encoded), 1024, "tool %q definition is %d bytes", tool.Name, len(encoded))
+		total += len(encoded)
+	}
+	// Measured with kandev's own estimator (o200k_base:mcp-tool-json-v1), the
+	// three tools cost 419 tokens together. This byte ceiling is the proxy
+	// this repo can enforce without importing kandev-internal packages.
+	require.Less(t, total, 2048, "agent_tools definitions total %d bytes", total)
 }
 
 // Least privilege: the plugin must not claim capabilities it never exercises.
