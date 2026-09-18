@@ -1,0 +1,55 @@
+import "./host-contract";
+import {
+  registerSourceControlRecipe,
+  type SourceControlRecipeLifecycle,
+} from "./source-control";
+import { createForgejoIcon } from "./forgejo-icon";
+import { createConnectionPanel } from "./connection-panel";
+import { toChangeRequestDetail } from "./detail";
+import { looksLikeRepositoryURL, parsePullRequestReference } from "./references";
+
+// Must equal manifest.yaml's `id`.
+const PLUGIN_ID = "kandev-plugin-forgejo";
+// Must equal manifest repository_providers[0] and the backend ProviderID.
+const PROVIDER_ID = "forgejo";
+
+let sourceControl: SourceControlRecipeLifecycle | undefined;
+
+window.registerKandevPlugin(PLUGIN_ID, {
+  initialize(registry, host) {
+    const icon = createForgejoIcon(host);
+
+    // One call registers the repository provider, the task Link action, and
+    // the review provider. Everything provider-specific is passed in here.
+    sourceControl = registerSourceControlRecipe(registry, host, {
+      providerId: PROVIDER_ID,
+      label: "Forgejo",
+      icon,
+      changeRequestNoun: "pull request",
+      order: 40,
+      supportsDraft: true,
+      matchesURL: looksLikeRepositoryURL,
+      parseReference: parsePullRequestReference,
+      toChangeRequestDetail,
+    });
+
+    // Kandev's native integration settings surface, shared with the built-in
+    // code hosts. The credential fields themselves come from the manifest's
+    // config_schema; this panel only reports reachability.
+    registry.registerIntegrationSettings({
+      id: PROVIDER_ID,
+      label: "Forgejo",
+      description:
+        "Connect a Forgejo or Gitea instance for repositories, pull requests, and reviews.",
+      icon,
+      Component: createConnectionPanel(host),
+    });
+  },
+
+  // initialize may run again in the same tab after a disable/enable cycle, so
+  // destroy must leave no timers, listeners, or cached snapshots behind.
+  destroy() {
+    sourceControl?.destroy();
+    sourceControl = undefined;
+  },
+});

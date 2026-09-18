@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@v4
+        with:
+          path: kandev-plugin-forgejo
+
+      # The SDK is not a standalone module yet, so the build needs a sibling
+      # kandev checkout (see README, "Development").
+      - name: Check out kandev SDK
+        uses: actions/checkout@v4
+        with:
+          repository: kdlbs/kandev
+          path: kandev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: kandev-plugin-forgejo/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install UI dependencies
+        working-directory: kandev-plugin-forgejo
+        run: npm install --no-audit --no-fund
+
+      - name: gofmt
+        working-directory: kandev-plugin-forgejo
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed for: $unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: kandev-plugin-forgejo
+        run: go vet ./...
+
+      - name: Typecheck UI
+        working-directory: kandev-plugin-forgejo
+        run: npm run typecheck
+
+      - name: Go tests
+        working-directory: kandev-plugin-forgejo
+        run: go test ./... -count=1
+
+      - name: UI tests
+        working-directory: kandev-plugin-forgejo
+        run: npm test
+
+      - name: Verify package
+        working-directory: kandev-plugin-forgejo
+        run: make verify-package
+
+  # The live contract tests are what back this plugin's "works on both" claim,
+  # so they run against a real Forgejo and a real Gitea on every change.
+  live:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: forgejo
+            image: codeberg.org/forgejo/forgejo:13
+          - flavor: gitea
+            image: gitea/gitea:1.24
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kandev-plugin-forgejo
+      - uses: actions/checkout@v4
+        with:
+          repository: kdlbs/kandev
+          path: kandev
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: kandev-plugin-forgejo/go.sum
+
+      - name: Start ${{ matrix.flavor }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          PREFIX: ${{ matrix.flavor == 'forgejo' && 'FORGEJO' || 'GITEA' }}
+        run: |
+          docker run -d --name instance -p 3000:3000 \
+            -e ${PREFIX}__security__INSTALL_LOCK=true \
+            -e ${PREFIX}__database__DB_TYPE=sqlite3 \
+            -e ${PREFIX}__server__ROOT_URL=http://localhost:3000/ \
+            -e SSH_PORT=2222 -e SSH_LISTEN_PORT=2222 \
+            "$IMAGE"
+          for _ in $(seq 1 90); do
+            if curl -sf http://localhost:3000/api/v1/version >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://localhost:3000/api/v1/version
+
+      - name: Seed instance
+        id: seed
+        env:
+          BINARY: ${{ matrix.flavor }}
+          ADMIN_PASSWORD: ${{ github.run_id }}-seed-Aa1!
+        run: |
+          set -euo pipefail
+          docker exec -u git -e ADMIN_PASSWORD="$ADMIN_PASSWORD" instance "$BINARY" admin user create \
+            --admin --username kandev --password "$ADMIN_PASSWORD" \
+            --email kandev@example.com --must-change-password=false
+          # Mint the API token through the admin CLI rather than HTTP basic
+          # auth, so no credential pair ever appears in a command line.
+          token="$(docker exec -u git instance "$BINARY" admin user generate-access-token \
+            --username kandev --token-name ci \
+            --scopes 'write:repository,write:issue,write:user,read:organization' \
+            --raw | tr -d '\r\n')"
+          echo "::add-mask::$token"
+          auth="Authorization: token $token"
+          curl -sf -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d '{"name":"demo","auto_init":true,"default_branch":"main"}' \
+            http://localhost:3000/api/v1/user/repos > /dev/null
+          content="$(printf 'hello' | base64 -w0)"
+          for pair in "feature/kandev-demo:demo.txt" "feature/kandev-create:create.txt"; do
+            branch="${pair%%:*}"; file="${pair##*:}"
+            curl -sf -X POST -H "$auth" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"$content\",\"message\":\"seed\",\"new_branch\":\"$branch\"}" \
+              "http://localhost:3000/api/v1/repos/kandev/demo/contents/$file" > /dev/null
+          done
+          curl -sf -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d '{"head":"feature/kandev-demo","base":"main","title":"Seed pull request"}' \
+            http://localhost:3000/api/v1/repos/kandev/demo/pulls > /dev/null
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Live contract tests
+        working-directory: kandev-plugin-forgejo
+        env:
+          KANDEV_FORGEJO_URL: http://localhost:3000
+          KANDEV_FORGEJO_TOKEN: ${{ steps.seed.outputs.token }}
+          KANDEV_FORGEJO_OWNER: kandev
+          KANDEV_FORGEJO_REPO: demo
+          KANDEV_FORGEJO_HEAD_BRANCH: feature/kandev-create
+        run: go test ./internal/forgejo -run TestLive -v -count=1

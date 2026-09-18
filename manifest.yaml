@@ -1,0 +1,97 @@
+# Kandev plugin manifest — the declarative contract between this plugin and a
+# Kandev host. `id` matches the Go module name, the id passed to
+# window.registerKandevPlugin(...) in ui/bundle.js, and the plugin-registry
+# catalog entry. Keep all four in sync when renaming.
+id: "kandev-plugin-forgejo"
+api_version: 1
+version: "0.1.0"
+display_name: "Forgejo"
+description: "Connect a self-hosted Forgejo or Gitea instance to native Kandev repository, pull-request, task-link, and review workflows."
+author: "naerymdan"
+categories: ["connector"]
+repo_url: "https://github.com/naerymdan/kandev-plugin-forgejo"
+icon: "assets/icon.svg"
+
+# The provider-neutral source-control contracts this plugin builds on landed
+# after v0.87.1 (source commit f218880ec) and first shipped in v0.88.0. That is
+# the floor for an activated provider recipe — not the base template's 0.86.0.
+min_kandev_version: "0.88.0"
+
+runtime:
+  type: binary
+  executables:
+    linux-amd64: "server/plugin-linux-amd64"
+    linux-arm64: "server/plugin-linux-arm64"
+    darwin-amd64: "server/plugin-darwin-amd64"
+    darwin-arm64: "server/plugin-darwin-arm64"
+    windows-amd64: "server/plugin-windows-amd64.exe"
+
+# Least privilege: `tasks`/`repositories` back the attached-repository resolver
+# used by verified PR creation; `state` backs the task<->pull-request
+# association store. No api_write — Kandev owns every entity mutation here.
+capabilities:
+  api_read: ["tasks", "repositories"]
+  state: true
+  secrets: true
+
+# Browser bodies are untrusted and bounded. Kandev authorizes each selector and
+# passes it separately as VerifiedActionContext.
+actions:
+  - key: "connection.get"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "connection.test"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "repositories.list"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "repositories.inspect"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "repositories.branches"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "change_requests.create"
+    scope: "task"
+    max_body_bytes: 65536
+  - key: "change_requests.get"
+    scope: "task"
+    max_body_bytes: 1024
+  - key: "change_requests.link"
+    scope: "task"
+    max_body_bytes: 16384
+  - key: "change_requests.unlink"
+    scope: "task"
+    max_body_bytes: 4096
+  - key: "change_requests.associations"
+    scope: "workspace"
+    max_body_bytes: 1024
+
+repository_providers: ["forgejo"]
+
+reference_sources:
+  - source: "forgejo_pull_requests"
+    provider: "forgejo"
+    kind: "pull_request"
+    display_name: "Forgejo pull requests"
+    kind_label: "Pull request"
+    order: 40
+
+ui:
+  bundle: "/ui/bundle.js"
+  styles: ["/ui/plugin.css"]
+
+config_schema:
+  type: object
+  required: ["base_url", "api_token"]
+  properties:
+    base_url:
+      type: string
+      title: "Instance URL"
+      description: "Base URL of the Forgejo or Gitea instance, e.g. https://codeberg.org. The REST v1 API is expected at <base_url>/api/v1."
+    api_token:
+      type: string
+      title: "Access token"
+      description: "Personal access token with read:repository (and write:repository to open pull requests). Stored in Kandev's encrypted vault and readable only inside this plugin process."
+      secret: true

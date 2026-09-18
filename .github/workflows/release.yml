@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kandev-plugin-forgejo
+      - uses: actions/checkout@v4
+        with:
+          repository: kdlbs/kandev
+          path: kandev
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: kandev-plugin-forgejo/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install UI dependencies
+        working-directory: kandev-plugin-forgejo
+        run: npm install --no-audit --no-fund
+
+      # The tag must match manifest.yaml's version, or the marketplace entry
+      # resolves to an asset name nobody can predict.
+      - name: Check tag matches manifest version
+        working-directory: kandev-plugin-forgejo
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(grep -E '^version:' manifest.yaml | head -1 | cut -d'"' -f2)"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag v$tag does not match manifest version $manifest"
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_ENV"
+
+      - name: Test
+        working-directory: kandev-plugin-forgejo
+        run: |
+          go test ./... -count=1
+          npm test
+
+      - name: Package all platforms
+        working-directory: kandev-plugin-forgejo
+        run: make verify-package
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: kandev-plugin-forgejo/kandev-plugin-forgejo-${{ env.version }}.tar.gz
+          generate_release_notes: true
