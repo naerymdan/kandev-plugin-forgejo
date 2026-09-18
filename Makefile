@@ -13,6 +13,14 @@ PKG_OUT := kandev-plugin-forgejo-$(VERSION).tar.gz
 # own go.sum rather than this module's.
 KANDEV_SDK := ../kandev/apps/backend
 
+# Release binaries are stripped and path-trimmed. `-s -w` drops the symbol
+# table and DWARF, which is about a third of the binary; Go keeps its pclntab
+# either way, so panic traces still carry function names and line numbers.
+# `-trimpath` replaces the builder's absolute paths with module-relative ones,
+# which keeps builds reproducible and keeps the build machine's directory
+# layout out of the shipped artifact.
+RELEASE_FLAGS := -trimpath -ldflags="-s -w"
+
 ## Build the plugin binary for the host platform (development only). Kandev
 ## always installs from `make package`/`package-host` output.
 build:
@@ -52,11 +60,11 @@ package: ui/bundle.js
 	cp -r ui $(STAGE)/ui
 	cp -r assets $(STAGE)/assets
 	rm -rf $(STAGE)/ui/src $(STAGE)/ui/test $(STAGE)/ui/tsconfig.json
-	GOOS=linux   GOARCH=amd64 go build -o $(STAGE)/server/plugin-linux-amd64       ./server
-	GOOS=linux   GOARCH=arm64 go build -o $(STAGE)/server/plugin-linux-arm64       ./server
-	GOOS=darwin  GOARCH=amd64 go build -o $(STAGE)/server/plugin-darwin-amd64      ./server
-	GOOS=darwin  GOARCH=arm64 go build -o $(STAGE)/server/plugin-darwin-arm64      ./server
-	GOOS=windows GOARCH=amd64 go build -o $(STAGE)/server/plugin-windows-amd64.exe ./server
+	GOOS=linux   GOARCH=amd64 go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-linux-amd64       ./server
+	GOOS=linux   GOARCH=arm64 go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-linux-arm64       ./server
+	GOOS=darwin  GOARCH=amd64 go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-darwin-amd64      ./server
+	GOOS=darwin  GOARCH=arm64 go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-darwin-arm64      ./server
+	GOOS=windows GOARCH=amd64 go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-windows-amd64.exe ./server
 	cd $(KANDEV_SDK) && go run ./cmd/plugin-pack -dir $(CURDIR)/$(STAGE) -out $(CURDIR)/$(PKG_OUT)
 	rm -rf $(STAGE)
 	@echo "Wrote $(PKG_OUT)"
@@ -69,7 +77,7 @@ package-host: ui/bundle.js
 	cp -r ui $(STAGE)/ui
 	cp -r assets $(STAGE)/assets
 	rm -rf $(STAGE)/ui/src $(STAGE)/ui/test $(STAGE)/ui/tsconfig.json
-	go build -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server
+	go build $(RELEASE_FLAGS) -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server
 	cd $(KANDEV_SDK) && go run ./cmd/plugin-pack -dir $(CURDIR)/$(STAGE) -out $(CURDIR)/$(PKG_OUT) -platform-only
 	rm -rf $(STAGE)
 	@echo "Wrote $(PKG_OUT)"
