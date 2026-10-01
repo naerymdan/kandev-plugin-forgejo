@@ -52,6 +52,7 @@ type Runtime struct {
 	repositories   *forgejo.Repositories
 	changeRequests *forgejo.ChangeRequests
 	associations   *forgejo.Associations
+	gitCredentials *forgejo.GitCredentials
 }
 
 var (
@@ -59,6 +60,7 @@ var (
 	_ pluginsdk.ActionHandler             = (*Runtime)(nil)
 	_ pluginsdk.EntityReferenceSearcher   = (*Runtime)(nil)
 	_ pluginsdk.EntityReferenceAuthorizer = (*Runtime)(nil)
+	_ pluginsdk.GitCredentialHandler      = (*Runtime)(nil)
 )
 
 // NewRuntime builds the runtime and its adapter graph. The Host is injected
@@ -78,6 +80,7 @@ func NewRuntime() *Runtime {
 	runtime.repositories = repositories
 	runtime.changeRequests = changeRequests
 	runtime.associations = associations
+	runtime.gitCredentials = forgejo.NewGitCredentials(connection)
 	runtime.extension = &sourcecontrol.Extension{
 		ProviderID:           ProviderID,
 		ReferenceSource:      ReferenceSource,
@@ -128,6 +131,48 @@ func (r *Runtime) SearchEntityReferences(ctx context.Context, request *pluginsdk
 // AuthorizeEntityReference delegates live reference authorization.
 func (r *Runtime) AuthorizeEntityReference(ctx context.Context, request *pluginsdk.AuthorizeEntityReferenceRequest) (*pluginsdk.AuthorizeEntityReferenceResponse, error) {
 	return r.extension.AuthorizeEntityReference(ctx, request)
+}
+
+// errGitCredentialWithheld is returned when this plugin does not own the
+// provider or the workspace has the integration switched off.
+var errGitCredentialWithheld = errors.New("kandev-plugin-forgejo: git credential withheld for this provider or workspace")
+
+// ResolveGitCredential supplies HTTPS clone and push credentials for a
+// repository on the configured instance.
+func (r *Runtime) ResolveGitCredential(ctx context.Context, request *pluginsdk.ResolveGitCredentialRequest) (*pluginsdk.ResolveGitCredentialResponse, error) {
+	if request == nil {
+		return nil, errGitCredentialWithheld
+	}
+	if err := r.gitCredentialAllowed(ctx, request.ProviderID, request.WorkspaceID); err != nil {
+		return nil, err
+	}
+	return r.gitCredentials.Resolve(ctx, request)
+}
+
+// GetGitCredentialBinding reports the non-secret credential revision Kandev
+// uses to revoke helper leases after rotation or disconnect.
+func (r *Runtime) GetGitCredentialBinding(ctx context.Context, request *pluginsdk.GitCredentialBindingRequest) (*pluginsdk.GitCredentialBindingResponse, error) {
+	if request == nil {
+		return nil, errGitCredentialWithheld
+	}
+	if err := r.gitCredentialAllowed(ctx, request.ProviderID, request.WorkspaceID); err != nil {
+		return nil, err
+	}
+	return r.gitCredentials.Binding(ctx, request)
+}
+
+func (r *Runtime) gitCredentialAllowed(ctx context.Context, providerID, workspaceID string) error {
+	if !strings.EqualFold(strings.TrimSpace(providerID), ProviderID) {
+		return errGitCredentialWithheld
+	}
+	enabled, err := r.integrationEnabled(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return errGitCredentialWithheld
+	}
+	return nil
 }
 
 // connectionStatusCacheKey holds the last probe result per workspace so

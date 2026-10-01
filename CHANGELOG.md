@@ -2,6 +2,16 @@
 
 ## 0.2.1
 
+- Task sessions can clone and push over HTTPS. Kandev asks the owning plugin
+  for transient Git credentials through its credential broker, and the plugin
+  implemented neither `ResolveGitCredential` nor `GetGitCredentialBinding`, so
+  every task on a Forgejo or Gitea repository failed to start with "plugin does
+  not implement git credential resolver". The configured token is issued only
+  for a single `owner/repo` path on the configured instance, only to requests
+  that carry complete workspace, task, session and repository identity, and
+  never while the workspace integration is switched off. The binding is a
+  digest over the instance URL, token and lease scope, so a rotated token
+  revokes the leases issued under the old one without a network call.
 - `repositories.inspect` now emits `provider_repository_id`, the field Kandev's
   inspection contract reads for the immutable repository identifier. The
   response only carried `repository_id`, so the host parsed an empty ID and

@@ -21,6 +21,7 @@ built-in code hosts.
 | Review panel + CI popover | Review state, approval counts, individual commit statuses, and unresolved review comments, on desktop and mobile. |
 | Composer `#` references | Search pull requests from the composer; access is re-checked live at submit time. |
 | Agent tools (MCP) | Two tools on task sessions — read CI for a ref (optionally with each failing job's log) and get/open/ready the task's pull request. |
+| Git credentials | HTTPS clone and push credentials for task sessions, via Kandev's Git credential broker. The configured token is issued only for `owner/repo` paths on the configured instance, only to complete task/session/repository scopes, and never while the workspace integration is switched off. Without this, Kandev cannot start a task on a Forgejo repository. |
 
 ## Requirements
 
